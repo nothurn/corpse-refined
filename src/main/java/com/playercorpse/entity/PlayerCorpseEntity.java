@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import javax.annotation.Nullable;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction.Axis;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
@@ -310,13 +311,49 @@ public class PlayerCorpseEntity extends LivingEntity {
    private void completeAshAndDiscard() {
       if (!this.isInventoryEmpty() && this.level() instanceof ServerLevel serverLevel) {
          PlayerGraveMarkerEntity marker = new PlayerGraveMarkerEntity(PlayerCorpseEntities.GRAVE_MARKER.get(), serverLevel);
-         marker.setPos(this.getX(), this.getY(), this.getZ());
+         marker.setPos(this.getX(), findGroundY(serverLevel, this.blockPosition()), this.getZ());
          marker.setYRot(this.getYRot());
          marker.transferFrom(this.inventory, this.equipment, this.generalOriginalSlot);
          serverLevel.addFreshEntity(marker);
       }
 
       this.discard();
+   }
+
+   /**
+    * BUG 4 fix: the marker used to spawn at this.getY() directly. Read
+    * through this.getY()'s actual provenance end to end (PlayerCorpseEvents
+    * sets it once at death via findSafeCorpsePos - the same non-solid block
+    * the dying player's own feet occupied - then tick()'s anchor logic pins
+    * it there unchanged for the corpse's entire lifetime) and through
+    * makeBoundingBox()'s own [y, y+0.6] hitbox, which is bottom-anchored at
+    * y, not centered around it. Both say this.getY() should already BE
+    * ground level, not a torso-centered offset - I could not reproduce a
+    * concrete Y-miscalculation by reading the code alone.
+    *
+    * Searching down for solid ground at spawn time anyway, rather than
+    * trusting the inherited value: this runs up to ~12,600 ticks (10.5
+    * real-world minutes, RECOVERY.md section 7's default total) after that
+    * Y was captured, and unlike the corpse's own tick() there is no anchor
+    * re-asserting it - terrain within that window (dug out, blown up,
+    * flooded/drained) can change the actual solid surface out from under a
+    * value that was only ever correct at the moment of death. This removes
+    * that dependency entirely instead of patching one specific cause -
+    * same reasoning findSafeCorpsePos already applies for the corpse's own
+    * spawn, just searching down for the first solid block instead of up
+    * for the first clear one.
+    */
+   private static double findGroundY(ServerLevel level, BlockPos start) {
+      BlockPos.MutableBlockPos pos = start.mutable();
+      for (int i = 0; i < 16; i++) {
+         if (!level.getBlockState(pos).getCollisionShape(level, pos).isEmpty()) {
+            return pos.getY() + 1;
+         }
+
+         pos.move(0, -1, 0);
+      }
+
+      return start.getY();
    }
 
    public void remove(RemovalReason reason) {
