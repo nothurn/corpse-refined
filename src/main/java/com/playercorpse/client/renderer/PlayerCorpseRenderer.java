@@ -45,6 +45,30 @@ import org.slf4j.Logger;
 public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntity, HumanoidModel<PlayerCorpseEntity>> {
    private static final Logger LOGGER = LogUtils.getLogger();
    private static final ResourceLocation SKELETON_TEXTURE = ResourceLocation.withDefaultNamespace("textures/entity/skeleton/skeleton.png");
+   /**
+    * BUG 3 fix: the ASH-phase BlendedTextureCache base texture used to be
+    * SKELETON_TEXTURE directly, but that's a legacy 64x32 mob texture whose
+    * UV layout only matches the modern 64x64 player-skin layout (the layout
+    * ash_N.png/shroud_erosion_N.png are authored against) for
+    * head/hat/body/right_arm/right_leg - confirmed against the real
+    * decompiled HumanoidModel/SkeletonModel/PlayerModel sources.
+    * left_arm/left_leg live at y>=32 in the player-skin layout, a row range
+    * skeleton.png doesn't have; every read there got clamped (by
+    * BlendedTextureCache's crash fix) to skeleton.png's row 31, which is
+    * literally the BODY's own bottom-edge pixel data (confirmed with real
+    * pixel reads, tools/inspect_uv_mapping.py) - not a crash, but a wrong
+    * body part composited onto the left arm/leg silhouette.
+    * ash_base.png (tools/generate_ash_base_texture.py) is a real 64x64
+    * texture in the correct UV layout: skeleton.png's actual pixel data
+    * copied 1:1 for the five shared-texOffs regions, and left_arm/left_leg
+    * derived by mirroring the real right_arm/right_leg data (the same
+    * left=mirror(right) assumption SkeletonModel's own geometry already
+    * makes for those two parts). Matching dimensions also mean
+    * BlendedTextureCache's clamp is never actually exercised by this call
+    * site anymore - it stays in BlendedTextureCache as valid defensive code
+    * for any other future mismatched baseTexture, just not load-bearing here.
+    */
+   private static final ResourceLocation ASH_BASE_TEXTURE = ResourceLocation.fromNamespaceAndPath("playercorpse", "textures/entity/ash_base.png");
    private static final int SHROUD_STAGE_COUNT = 9;
    private static final ResourceLocation[] SHROUD_STAGE_TEXTURES = new ResourceLocation[9];
    private static final int ASH_STAGE_COUNT = 9;
@@ -178,7 +202,7 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
       int stageHigh = Mth.clamp(stageLow + 1, 0, 8);
       float frac = Mth.clamp(scaled - stageLow, 0.0F, 1.0F);
       return BlendedTextureCache.getOrCreate(
-         entity.getId(), "ash", ASH_STAGE_TEXTURES[stageLow], ASH_STAGE_TEXTURES[stageHigh], frac, SKELETON_TEXTURE
+         entity.getId(), "ash", ASH_STAGE_TEXTURES[stageLow], ASH_STAGE_TEXTURES[stageHigh], frac, ASH_BASE_TEXTURE
       );
    }
 

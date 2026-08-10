@@ -1,13 +1,24 @@
 """
 Standalone numerical re-implementation of BlendedTextureCache.blend()'s pixel
-math (lerpPixel/compositeOver/pack, and the new base-bounds clamping), run
+math (lerpPixel/compositeOver/pack, and the base-bounds clamping), run
 against synthetic images shaped like the real crash: a 64x64 stageLow/stageHigh
 pair (ash_N.png format) composited onto a 64x32 base (skeleton.png's actual
 legacy mob-texture format). This environment can't launch Minecraft or call
-the real Java code, so this is the closest available check that the new
+the real Java code, so this is the closest available check that the
 clamping logic (a) never indexes outside the base image's real bounds and
 (b) produces a correctly-sized, fully-opaque result - the two properties the
-crash report showed were violated before the fix.
+crash report showed were violated before that fix.
+
+NOTE (BUG 3 fix, see .ai-brain.md): the real ASH-phase call site no longer
+actually hits this 64x64-vs-64x32 mismatch in practice - PlayerCorpseRenderer
+now passes ash_base.png (64x64, UV-correct, see
+tools/generate_ash_base_texture.py) instead of vanilla skeleton.png as the
+base texture, so BlendedTextureCache's clamp is never exercised by that
+caller anymore. This test still matters: the clamp itself remains real,
+correct, general-purpose defensive code in blend() for any future mismatched
+baseTexture, and this is the only thing that regression-tests it. See
+tools/verify_ash_base_texture.py for the check that's actually load-bearing
+for the current ASH-phase base texture's correctness.
 """
 import numpy as np
 
