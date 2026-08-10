@@ -91,6 +91,36 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
       return entity.getDecayPhase().ordinal() < DecayPhase.HOLD_FULL_SKELETON.ordinal();
    }
 
+   /**
+    * Whether CorpseShroudLayer is actually drawing something opaque over the
+    * model this tick - the exact condition CorpseShroudLayer.render() itself
+    * gates on. Shared with StaticPlayerModel's own hat-hiding so the two
+    * can't independently drift out of sync (that drift, before this fix, was
+    * the whole bug: the base draw never checked this at all).
+    */
+   private static boolean isShroudCovering(PlayerCorpseEntity entity) {
+      DecayPhase phase = entity.getDecayPhase();
+      return phase != DecayPhase.HOLD_FRESH && phase.ordinal() < DecayPhase.HOLD_FULL_SKELETON.ordinal();
+   }
+
+   /**
+    * Scales a part down toward (near) zero as t approaches 1, THEN flips
+    * visible to false only once fully hidden - never the other order.
+    * ModelPart.visible has no interpolation of its own (rendering lesson 2);
+    * toggling it at full scale is a hard, visible pop. Shared by both static
+    * models: StaticHumanoidModel's ash vanish and StaticPlayerModel's
+    * shroud-coverage hat hiding are the same problem (hide a part in sync
+    * with a continuous 0-1 driver, no boolean-only jump) on two different
+    * models.
+    */
+   private static void setVanishing(ModelPart part, float t, boolean fullyHidden) {
+      float scale = Math.max(1.0F - t, 0.001F);
+      part.xScale = scale;
+      part.yScale = scale;
+      part.zScale = scale;
+      part.visible = !fullyHidden;
+   }
+
    private static PlayerModel<PlayerCorpseEntity> choosePlayerModel(
       PlayerCorpseEntity entity, PlayerModel<PlayerCorpseEntity> wideModel, PlayerModel<PlayerCorpseEntity> slimModel
    ) {
@@ -236,7 +266,7 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          float headPitch
       ) {
          DecayPhase phase = entity.getDecayPhase();
-         if (phase != DecayPhase.HOLD_FRESH && phase.ordinal() < DecayPhase.HOLD_FULL_SKELETON.ordinal()) {
+         if (PlayerCorpseRenderer.isShroudCovering(entity)) {
             int entityId = entity.getId();
             int tickCount = entity.tickCount;
             if (this.loggedSpawnIds.add(entityId)) {
@@ -476,10 +506,10 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          this.leftLeg.xRot += droop;
          this.leftLeg.zRot -= splay * 0.5F;
          boolean limbsHidden = effective >= DecayCurves.ASH_HIDE_LIMBS_AT;
-         setVanishing(this.rightArm, limbsT, limbsHidden);
-         setVanishing(this.leftArm, limbsT, limbsHidden);
-         setVanishing(this.rightLeg, limbsT, limbsHidden);
-         setVanishing(this.leftLeg, limbsT, limbsHidden);
+         PlayerCorpseRenderer.setVanishing(this.rightArm, limbsT, limbsHidden);
+         PlayerCorpseRenderer.setVanishing(this.leftArm, limbsT, limbsHidden);
+         PlayerCorpseRenderer.setVanishing(this.rightLeg, limbsT, limbsHidden);
+         PlayerCorpseRenderer.setVanishing(this.leftLeg, limbsT, limbsHidden);
 
          // Head: skull tilts - ONE axis only (xRot). ModelPart composes rotation Z-then-Y-then-X
          // around its own pivot; xRot+zRot together on the head produces a corkscrew motion instead
@@ -487,29 +517,13 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          // in a way it never is on texture-less limb bones (RECOVERY.md rendering lesson 3).
          this.head.xRot += 0.28F * headT;
          boolean headHidden = effective >= DecayCurves.ASH_HIDE_HEAD_AT;
-         setVanishing(this.head, headT, headHidden);
+         PlayerCorpseRenderer.setVanishing(this.head, headT, headHidden);
          this.hat.visible = this.head.visible;
 
          // Body: sinks and caves in slightly, deforms and vanishes last of the three groups.
          this.body.y += 0.5F * bodyT;
          this.body.xRot += 0.15F * bodyT;
-         setVanishing(this.body, bodyT, effective >= DecayCurves.ASH_HIDE_BODY_AT);
-      }
-
-      /**
-       * Scales a part down toward (near) zero as t approaches 1, THEN flips
-       * visible to false only once fully hidden - never the other order.
-       * ModelPart.visible has no interpolation of its own (rendering lesson
-       * 2); toggling it at full scale is a hard, visible pop. Ramping scale
-       * down first means the part is already imperceptibly small by the
-       * time the boolean actually flips.
-       */
-      private static void setVanishing(ModelPart part, float t, boolean fullyHidden) {
-         float scale = Math.max(1.0F - t, 0.001F);
-         part.xScale = scale;
-         part.yScale = scale;
-         part.zScale = scale;
-         part.visible = !fullyHidden;
+         PlayerCorpseRenderer.setVanishing(this.body, bodyT, effective >= DecayCurves.ASH_HIDE_BODY_AT);
       }
    }
 
@@ -520,6 +534,39 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
 
       public void setupAnim(PlayerCorpseEntity entity, float limbSwing, float limbSwingAmount, float ageInTicks, float netHeadYaw, float headPitch) {
          super.setupAnim(entity, 0.0F, 0.0F, 0.0F, netHeadYaw, headPitch);
+         this.applyHatCoverage(entity);
+      }
+
+      /**
+       * Hides hair (the "hat" second-layer cube) as the shroud grows over
+       * it. Bug: the base LivingEntityRenderer draw (this model, via
+       * getTextureLocation returning the real player skin) never touched
+       * hat.visible at all - only CorpseShroudLayer's OWN separate overlay
+       * draw hid it, and only within that one draw call, restoring it
+       * straight after. Net effect: hair rendered fully opaque in the base
+       * pass for the entire BUILD phase, completely unaffected by the
+       * shroud fading in on top of it, because the shroud's own draw never
+       * paints over the hat cube's footprint either (it hides that cube
+       * rather than drawing it).
+       *
+       * Fix is scale-ramped in lockstep with the SAME buildAlphaCurve value
+       * that drives the shroud's own vertex alpha, not a hard cutoff at the
+       * BUILD phase boundary - a hard toggle would pop the hair away in one
+       * frame while the shroud itself is still at ~0 alpha (indistinguishable
+       * from invisible), which is its own separate glitch. Reusing
+       * PlayerCorpseRenderer.setVanishing (same ramp-then-flip discipline as
+       * the ash system) keeps both hidings driven by one curve, so they can
+       * never visibly disagree.
+       *
+       * This model is also reused as CorpseShroudLayer's own playerModel
+       * reference for HOLD_FULL_SHROUD/EROSION, where phase != BUILD makes
+       * coverage 0 here - harmless, since CorpseShroudLayer forces
+       * hat.visible = false itself immediately after calling setupAnim for
+       * every phase it draws in, overriding whatever this method computed.
+       */
+      private void applyHatCoverage(PlayerCorpseEntity entity) {
+         float coverage = entity.getDecayPhase() == DecayPhase.BUILD ? DecayCurves.buildAlphaCurve(entity.getPhaseProgress()) : 0.0F;
+         PlayerCorpseRenderer.setVanishing(this.hat, coverage, coverage >= 1.0F);
       }
    }
 }
