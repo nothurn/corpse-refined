@@ -324,7 +324,35 @@ public class PlayerCorpseEntity extends LivingEntity {
          double groundY = findGroundY(serverLevel, this.blockPosition());
          PlayerGraveMarkerEntity marker = new PlayerGraveMarkerEntity(PlayerCorpseEntities.GRAVE_MARKER.get(), serverLevel);
          marker.setPos(this.getX(), groundY, this.getZ());
-         marker.setYRot(this.getYRot());
+         /*
+          * Orientation fix (2026-08-11): previously inherited this.getYRot() - the
+          * corpse's own yaw, which is just whatever direction the player happened to
+          * be facing at the moment of death. That has no relationship to how the
+          * cross should face a later viewer, and GraveMarkerRenderer.createBodyLayer's
+          * crossbar only extends along the model's own local X axis (a thin 2-unit
+          * Z depth, same as the post) - a random yaw reads as a proper cross from
+          * some approach angles and edge-on/near-invisible from others, roughly at
+          * random. PLUS - confirmed by reading LivingEntityRenderer#render (ground
+          * truth decompiled source): it reads entity.yBodyRot directly as a field,
+          * NOT getYRot() - and LivingEntity only syncs yBodyRot from yRot for moving
+          * entities (the position-delta path in LivingEntity#tick), which a static,
+          * noPhysics marker never triggers. The old setYRot()-only call therefore
+          * never actually affected the rendered angle at all; every marker rendered
+          * at yBodyRot's Java default of 0.0F regardless. Compare
+          * PlayerCorpseEvents' corpse spawn, which correctly sets all three
+          * (setYRot/setYHeadRot/setYBodyRot) - the marker spawn here was missing
+          * the two that matter for LivingEntityRenderer.
+          *
+          * Fix: stop inheriting the corpse's arbitrary yaw and use a fixed,
+          * deliberate default (0.0F - the model's own unrotated/identity
+          * orientation, i.e. exactly what PartPose.ZERO already implies was
+          * intended) via setYBodyRot(), the field the renderer actually reads.
+          * Every marker now faces the same predictable direction instead of a
+          * death-facing angle that had no bearing on readability.
+          */
+         marker.setYRot(0.0F);
+         marker.setYHeadRot(0.0F);
+         marker.setYBodyRot(0.0F);
          marker.transferFrom(this.inventory, this.equipment, this.generalOriginalSlot);
          serverLevel.addFreshEntity(marker);
          // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent. Logs all
