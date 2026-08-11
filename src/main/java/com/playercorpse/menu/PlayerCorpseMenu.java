@@ -97,6 +97,26 @@ public class PlayerCorpseMenu extends AbstractContainerMenu {
       return this.generalOriginalSlots;
    }
 
+   /**
+    * Inverse of PlayerCorpseEntity.generalSlotForPlayerInventorySlot, but
+    * mapping to THIS menu's own slot-list position rather than a corpse
+    * general-container index - see the addSlot loops in the constructor:
+    * the 3 main-inventory rows are added first (Inventory index 9-35, in
+    * row-major order) immediately after CORPSE_SLOTS_END, then the hotbar
+    * row last (Inventory index 0-8). player.getInventory()'s own index
+    * space (0-8 hotbar, 9-35 main) is exactly what
+    * generalOriginalSlots[] stores (see PlayerCorpseEvents/
+    * PlayerCorpseEntity.setGeneralOriginalSlot) - this converts that stored
+    * index into a slot position moveItemStackTo can target directly.
+    */
+   private static int menuSlotForPlayerInventoryIndex(int playerInventoryIndex) {
+      if (playerInventoryIndex >= 0 && playerInventoryIndex < 9) {
+         return CORPSE_SLOTS_END + 27 + playerInventoryIndex;
+      } else {
+         return playerInventoryIndex >= 9 && playerInventoryIndex < 36 ? CORPSE_SLOTS_END + (playerInventoryIndex - 9) : -1;
+      }
+   }
+
    public ItemStack quickMoveStack(Player player, int index) {
       ItemStack result = ItemStack.EMPTY;
       Slot slot = (Slot)this.slots.get(index);
@@ -104,7 +124,21 @@ public class PlayerCorpseMenu extends AbstractContainerMenu {
          ItemStack original = slot.getItem();
          result = original.copy();
          if (index < CORPSE_SLOTS_END) {
-            if (!this.moveItemStackTo(original, CORPSE_SLOTS_END, this.slots.size(), true)) {
+            // Slot-preserving recovery: an item pulled from the corpse's general container tries its
+            // death-time original player-inventory slot FIRST (empty -> placed there; occupied by a
+            // compatible stack with room -> merges there; anything else -> falls through untouched to
+            // the normal first-available-slot search below, exactly like before this existed).
+            // Equipment slots have no "original slot" concept (each equipment index already has one
+            // fixed meaning), so this only applies to the general range.
+            if (index >= EQUIPMENT_SLOTS && this.generalOriginalSlots != null) {
+               int originalPlayerSlot = this.generalOriginalSlots[index - EQUIPMENT_SLOTS];
+               int targetMenuSlot = originalPlayerSlot >= 0 ? menuSlotForPlayerInventoryIndex(originalPlayerSlot) : -1;
+               if (targetMenuSlot >= 0) {
+                  this.moveItemStackTo(original, targetMenuSlot, targetMenuSlot + 1, false);
+               }
+            }
+
+            if (!original.isEmpty() && !this.moveItemStackTo(original, CORPSE_SLOTS_END, this.slots.size(), true)) {
                return ItemStack.EMPTY;
             }
          } else if (!this.moveItemStackTo(original, EQUIPMENT_SLOTS, CORPSE_SLOTS_END, false)) {
