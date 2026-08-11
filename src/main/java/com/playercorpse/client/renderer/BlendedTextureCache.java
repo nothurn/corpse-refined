@@ -155,6 +155,43 @@ public final class BlendedTextureCache {
       return pack(r, g, b, a);
    }
 
+   /**
+    * BUG 3 fix (2026-08-11): previously forced output alpha to a flat 255
+    * regardless of the base pixel's own alpha - correct wherever base is
+    * genuinely opaque (every region ash_base.png actually copied real
+    * skeleton.png pixel data into: head, body, right_arm, right_leg, and
+    * left_arm/left_leg via SkeletonModel's own UV-mirror of
+    * right_arm/right_leg), but WRONG for the one region
+    * SkeletonModel actually samples that ash_base.png deliberately leaves
+    * fully transparent: the hat cube's texOffs (32,0)-(64,16), left blank
+    * because real skeleton.png has no hat/hair pixel data at all (skeletons
+    * don't have hair - confirmed by tools/verify_ash_base_texture.py's own
+    * explicit exclusion of "hat" from its non-transparency assertions).
+    *
+    * Concrete failure, confirmed with real pixel data (tools/trace_blend.py
+    * equivalent, run against the actual committed ash_0.png/ash_base.png):
+    * at hat-region coordinates like (44,4), ash_base's pixel is (0,0,0,0)
+    * and ash_0's overlay pixel there is (215,210,200,0) (no ash yet). The
+    * old code computed r=g=b=0 (100% weighted toward base since overlay
+    * alpha=0) and then hard-set alpha=255 - i.e. a fully OPAQUE BLACK
+    * pixel, for a region that should stay fully transparent until ash
+    * itself puts some opacity there. Rendered through entityCutoutNoCull
+    * (NO_TRANSPARENCY - alpha-test discard, no GL blending, confirmed
+    * against the real decompiled RenderType source), every one of those
+    * pixels passes the alpha test and paints fully opaque: the hat cube -
+    * visible for the vast majority of the ASH phase's real duration, since
+    * DecayCurves.ashCollapseCurve/ASH_HIDE_HEAD_AT keeps effective progress
+    * low (and hat.visible=true) for the first 82% of the phase - rendered
+    * as a solid black box enclosing the head.
+    *
+    * Fix: compute a real output alpha as standard "src over dst" (dst may
+    * itself be transparent), and only force full opacity when the
+    * destination (base) actually contributes real, opaque data. Where base
+    * alpha is already 255 (every load-bearing region), outA reduces to
+    * exactly 1.0 and this produces byte-identical results to the old code -
+    * this only changes behavior for base pixels that are genuinely
+    * transparent, i.e. exactly the hat region.
+    */
    private static int compositeOver(int overlay, int base) {
       int or = overlay & 0xFF;
       int og = overlay >> 8 & 0xFF;
@@ -163,11 +200,22 @@ public final class BlendedTextureCache {
       int br = base & 0xFF;
       int bg = base >> 8 & 0xFF;
       int bb = base >> 16 & 0xFF;
-      float alpha = oa / 255.0F;
-      int r = Math.round(or * alpha + br * (1.0F - alpha));
-      int g = Math.round(og * alpha + bg * (1.0F - alpha));
-      int b = Math.round(ob * alpha + bb * (1.0F - alpha));
-      return pack(r, g, b, 255);
+      int ba = base >> 24 & 0xFF;
+      float srcAlpha = oa / 255.0F;
+      float dstAlpha = ba / 255.0F;
+      float outAlpha = srcAlpha + dstAlpha * (1.0F - srcAlpha);
+      int r;
+      int g;
+      int b;
+      if (outAlpha <= 0.0F) {
+         r = g = b = 0;
+      } else {
+         r = Math.round((or * srcAlpha + br * dstAlpha * (1.0F - srcAlpha)) / outAlpha);
+         g = Math.round((og * srcAlpha + bg * dstAlpha * (1.0F - srcAlpha)) / outAlpha);
+         b = Math.round((ob * srcAlpha + bb * dstAlpha * (1.0F - srcAlpha)) / outAlpha);
+      }
+
+      return pack(r, g, b, Math.round(outAlpha * 255.0F));
    }
 
    private static int pack(int r, int g, int b, int a) {

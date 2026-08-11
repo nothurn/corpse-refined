@@ -43,6 +43,37 @@ public class GraveMarkerRenderer extends LivingEntityRenderer<PlayerGraveMarkerE
       return OAK_PLANKS_TEXTURE;
    }
 
+   /**
+    * BUG 4 fix (2026-08-11): LivingEntityRenderer#render (ground-truth
+    * decompiled 1.21.1 source) unconditionally runs
+    * "poseStack.translate(0.0F, -1.501F, 0.0F)" right after its
+    * "poseStack.scale(-1.0F, -1.0F, 1.0F)" Y-flip, for every subtype,
+    * regardless of the model's own geometry. That -1.501 in the
+    * already-flipped frame works out (traced through the flip) to shifting
+    * every subsequently drawn vertex UP by 1.501 world blocks relative to
+    * the entity's real anchor Y - a magic number calibrated for vanilla
+    * humanoid/mob models, whose leg parts hang below their own local y=0,
+    * not for a model authored with local y=0 already AT the feet.
+    *
+    * createBodyLayer() below builds the post starting at local y=0 ("extending
+    * up from the entity's feet" - its own comment), i.e. exactly the
+    * "local y=0 IS the feet" shape the base offset assumes is NOT the case.
+    * With nothing here to counteract it, the whole cross rendered 1.501
+    * blocks above the entity's actual (logged, confirmed-correct) Y - the
+    * floating bug, confirmed by manually tracing the PoseStack chain
+    * (translate -> scale(-1,-1,1) -> the rest) coordinate-by-coordinate.
+    *
+    * Fix: cancel it here, in setupRotations (runs BEFORE that scale flip,
+    * same pattern PlayerCorpseRenderer.setupRotations already uses for its
+    * own pose adjustments) - translating by -1.501 in this pre-flip frame
+    * becomes +1.501 after the flip, exactly cancelling the base class's
+    * built-in shift so local y=0 lands exactly on the entity's anchor Y.
+    */
+   protected void setupRotations(PlayerGraveMarkerEntity entity, PoseStack poseStack, float ageInTicks, float rotationYaw, float partialTick, float scale) {
+      super.setupRotations(entity, poseStack, ageInTicks, rotationYaw, partialTick, scale);
+      poseStack.translate(0.0, -1.501, 0.0);
+   }
+
    protected boolean shouldShowName(PlayerGraveMarkerEntity entity) {
       return false;
    }
