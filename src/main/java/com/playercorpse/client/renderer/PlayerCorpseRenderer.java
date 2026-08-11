@@ -22,6 +22,12 @@ import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.PlayerModel;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.client.model.geom.PartPose;
+import net.minecraft.client.model.geom.builders.CubeDeformation;
+import net.minecraft.client.model.geom.builders.CubeListBuilder;
+import net.minecraft.client.model.geom.builders.LayerDefinition;
+import net.minecraft.client.model.geom.builders.MeshDefinition;
+import net.minecraft.client.model.geom.builders.PartDefinition;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
@@ -86,12 +92,52 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    private final PlayerModel<PlayerCorpseEntity> wideModel = (PlayerModel<PlayerCorpseEntity>)this.model;
    private final PlayerModel<PlayerCorpseEntity> slimModel;
    private final HumanoidModel<PlayerCorpseEntity> skeletonModel;
+   /**
+    * 2026-08-11 phase-boundary POP fix. `skeletonModel` above is baked via
+    * `context.bakeLayer(ModelLayers.SKELETON)`, which resolves to vanilla's
+    * own `SkeletonModel.createBodyLayer()` - `LayerDefinition.create(mesh,
+    * 64, 32)`, confirmed from the real decompiled source. `ModelPart.Cube`/
+    * `Polygon` bake each vertex's normalized UV as texCoordV / texHeight
+    * ONCE, at this bake call (confirmed from `ModelPart.Polygon`'s
+    * constructor: `v1/textureHeight`, `v2/textureHeight`) - never
+    * recomputed at render time against whatever texture is actually bound.
+    * `getTextureLocation()` binds the real 64x32 `SKELETON_TEXTURE` for
+    * every phase up through HOLD_FULL_SKELETON (matches `skeletonModel`'s
+    * baked assumption exactly - looks correct), but the INSTANT phase
+    * becomes ASH it switches to `ashTextureFor()`'s output, which
+    * `BlendedTextureCache.blend()` always sizes to match `ash_N.png` (64x64
+    * per `generate_ash_texture.py`) - double the baked height. Every
+    * already-baked v = texCoordV/32 then samples row (v*64) of the actual
+    * bound 64-tall texture instead of the intended row texCoordV out of 32 -
+    * e.g. right_arm's side faces (baked v 18-30/32) land on rows 36-60 of a
+    * 64-tall image, which is either fully transparent or a completely
+    * unrelated region in `ash_base.png`. Quantified before fixing (scratch
+    * script, not preserved): every sampled part landed 60-100% on fully
+    * transparent pixels once bound against the real 64x64 ash texture - an
+    * instant, hard visual corruption at the exact tick the phase flips,
+    * independent of how subtle the ash overlay itself is at frac=0. This is
+    * the root cause of "clean skeleton, then instant pop to a
+    * weird/malformed shape, then it keeps decaying from there" - a genuinely
+    * different bug from the color/seam tuning done in the previous two
+    * sessions, not a residual symptom of either.
+    *
+    * Fix: bake a SEPARATE copy of the exact same skeleton geometry (same
+    * texOffs, same thin 2x12x2 limb overrides - duplicated from
+    * `SkeletonModel.createDefaultSkeletonMesh()` here because that method is
+    * `protected static` on a class this one doesn't extend) at texHeight=64
+    * instead of 32, so its baked UVs actually match `ash_base.png`/
+    * `ash_N.png`'s real dimensions. Used ONLY while `DecayPhase.ASH` is
+    * active - HOLD_FULL_SKELETON and earlier keep using `skeletonModel`
+    * against the real `SKELETON_TEXTURE`, unaffected by this change.
+    */
+   private final HumanoidModel<PlayerCorpseEntity> ashSkeletonModel;
    private static final float HALF_BODY_LENGTH = 0.9F;
 
    public PlayerCorpseRenderer(Context context) {
       super(context, new PlayerCorpseRenderer.StaticPlayerModel(context.bakeLayer(ModelLayers.PLAYER), false), 0.0F);
       this.slimModel = new PlayerCorpseRenderer.StaticPlayerModel(context.bakeLayer(ModelLayers.PLAYER_SLIM), true);
       this.skeletonModel = new PlayerCorpseRenderer.StaticHumanoidModel(context.bakeLayer(ModelLayers.SKELETON));
+      this.ashSkeletonModel = new PlayerCorpseRenderer.StaticHumanoidModel(buildAshSkeletonRoot());
       this.addLayer(new PlayerCorpseRenderer.CorpseShroudLayer(this, this.wideModel, this.slimModel));
       ModelManager modelManager = context.getModelManager();
       this.addLayer(
@@ -114,6 +160,36 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
       );
       this.addLayer(new ItemInHandLayer(this, context.getItemInHandRenderer()));
       this.addLayer(new PlayerCorpseRenderer.CorpseDeathCauseTintLayer(this));
+   }
+
+   /**
+    * Duplicates SkeletonModel.createDefaultSkeletonMesh()'s thin-limb
+    * overrides (same texOffs, same 2x12x2 dimensions, same mirror flags -
+    * confirmed against the real decompiled source) on top of
+    * HumanoidModel.createMesh()'s shared head/hat/body definition, then
+    * bakes at texHeight=64 instead of vanilla's own 64x32 - see the
+    * ashSkeletonModel field comment for why. Geometry is byte-for-byte
+    * identical to vanilla's skeleton shape; only the baked UV denominator
+    * differs.
+    */
+   private static ModelPart buildAshSkeletonRoot() {
+      MeshDefinition mesh = HumanoidModel.createMesh(CubeDeformation.NONE, 0.0F);
+      PartDefinition root = mesh.getRoot();
+      root.addOrReplaceChild(
+         "right_arm", CubeListBuilder.create().texOffs(40, 16).addBox(-1.0F, -2.0F, -1.0F, 2.0F, 12.0F, 2.0F), PartPose.offset(-5.0F, 2.0F, 0.0F)
+      );
+      root.addOrReplaceChild(
+         "left_arm",
+         CubeListBuilder.create().texOffs(40, 16).mirror().addBox(-1.0F, -2.0F, -1.0F, 2.0F, 12.0F, 2.0F),
+         PartPose.offset(5.0F, 2.0F, 0.0F)
+      );
+      root.addOrReplaceChild(
+         "right_leg", CubeListBuilder.create().texOffs(0, 16).addBox(-1.0F, 0.0F, -1.0F, 2.0F, 12.0F, 2.0F), PartPose.offset(-2.0F, 12.0F, 0.0F)
+      );
+      root.addOrReplaceChild(
+         "left_leg", CubeListBuilder.create().texOffs(0, 16).mirror().addBox(-1.0F, 0.0F, -1.0F, 2.0F, 12.0F, 2.0F), PartPose.offset(2.0F, 12.0F, 0.0F)
+      );
+      return LayerDefinition.create(mesh, 64, 64).bakeRoot();
    }
 
    private static boolean isSkeletonPhase(PlayerCorpseEntity entity) {
@@ -161,7 +237,9 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    }
 
    public void render(PlayerCorpseEntity entity, float entityYaw, float partialTick, PoseStack poseStack, MultiBufferSource bufferSource, int packedLight) {
-      if (isSkeletonPhase(entity)) {
+      if (entity.getDecayPhase() == DecayPhase.ASH) {
+         this.model = this.ashSkeletonModel;
+      } else if (isSkeletonPhase(entity)) {
          this.model = this.skeletonModel;
       } else {
          this.model = choosePlayerModel(entity, this.wideModel, this.slimModel);
@@ -198,6 +276,22 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    }
 
    public ResourceLocation getTextureLocation(PlayerCorpseEntity entity) {
+      return resolveBodyTexture(entity);
+   }
+
+   /**
+    * Shared by the main body draw (getTextureLocation, above) and
+    * CorpseDeathCauseTintLayer's own separate translucent draw - both must
+    * always agree on which texture goes with the current DecayPhase.ASH ->
+    * ashSkeletonModel model swap (see that field's comment); before this
+    * extraction the tint layer had its own slightly different inline
+    * ternary, which would have kept binding the real (64x32) SKELETON_TEXTURE
+    * against the new 64x64-baked ashSkeletonModel for fire/drowning-death
+    * corpses in ASH - the exact same UV mismatch this whole fix removes,
+    * reintroduced in one specific layer. Same discipline as isShroudCovering
+    * above, which exists for the identical reason.
+    */
+   private static ResourceLocation resolveBodyTexture(PlayerCorpseEntity entity) {
       if (entity.getDecayPhase() == DecayPhase.ASH) {
          return ashTextureFor(entity);
       }
@@ -280,9 +374,7 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
                case FALL, OTHER -> 0;
             };
             if (tint != 0) {
-               ResourceLocation texture = PlayerCorpseRenderer.isSkeletonPhase(entity)
-                  ? PlayerCorpseRenderer.SKELETON_TEXTURE
-                  : PlayerCorpseRenderer.resolveSkin(entity).texture();
+               ResourceLocation texture = PlayerCorpseRenderer.resolveBodyTexture(entity);
                VertexConsumer buffer = bufferSource.getBuffer(RenderType.entityTranslucent(texture));
                ((HumanoidModel)this.getParentModel()).renderToBuffer(poseStack, buffer, packedLight, OverlayTexture.NO_OVERLAY, tint);
             }
