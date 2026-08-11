@@ -90,13 +90,29 @@ public final class PlayerCorpseNetworking {
       equipmentContainer.setChanged();
    }
 
+   /**
+    * Bulk-transfer counterpart of PlayerCorpseMenu's single-click
+    * quickMoveStack slot-preservation - tries each item's original
+    * player-inventory slot first, same as the shift-click path, before the
+    * generic transferAllInto() fallback below handles whatever's left.
+    *
+    * originalSlot < 36 guard (2026-08-11): serverPlayer.getInventory() is
+    * the vanilla Inventory, whose getItem/setItem cover its FULL 41-slot
+    * combined space (36 general + 4 armor + 1 offhand - confirmed against
+    * the decompiled source), not just the 36-slot general range this
+    * corpse's own general container occupies. Without this check, a stored
+    * originalSlot of 36-40 (possible before the PlayerCorpseEvents fix that
+    * now clamps it at the source - kept here too in case NBT-loaded data
+    * from before that fix is still on disk) would write straight into the
+    * player's live armor/offhand slot instead of their general inventory.
+    */
    private static void restoreToOriginalSlots(ServerPlayer serverPlayer, Container generalContainer, int[] originalSlots) {
       if (originalSlots != null) {
          for (int corpseSlot = 0; corpseSlot < generalContainer.getContainerSize(); corpseSlot++) {
             ItemStack stack = generalContainer.getItem(corpseSlot);
             if (!stack.isEmpty()) {
                int originalSlot = originalSlots[corpseSlot];
-               if (originalSlot >= 0 && serverPlayer.getInventory().getItem(originalSlot).isEmpty()) {
+               if (originalSlot >= 0 && originalSlot < 36 && serverPlayer.getInventory().getItem(originalSlot).isEmpty()) {
                   serverPlayer.getInventory().setItem(originalSlot, stack);
                   generalContainer.setItem(corpseSlot, ItemStack.EMPTY);
                }

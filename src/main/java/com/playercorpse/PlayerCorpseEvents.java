@@ -113,7 +113,20 @@ public final class PlayerCorpseEvents {
                         level.addFreshEntity(overflow);
                      } else {
                         corpse.getInventory().setItem(targetSlot, stack);
-                        corpse.setGeneralOriginalSlot(targetSlot, originalSlot);
+                        // Recovery fix (2026-08-11): originalSlot is read from Inventory.getContainerSize()'s
+                        // FULL 41-slot space (36 general + 4 armor + 1 offhand - confirmed against the real
+                        // decompiled Inventory source, compartments = [items(36), armor(4), offhand(1)]), not
+                        // just the 36-slot general range generalSlotForPlayerInventorySlot() validates above.
+                        // A worn armor/offhand item (raw index 36-40) that gets displaced into THIS general
+                        // branch - e.g. a spare item of the same equipment type claimed the corpse's equipment
+                        // slot first - would otherwise store that raw 36-40 index as its "original slot".
+                        // PlayerCorpseMenu.menuSlotForPlayerInventoryIndex() already treats >=36 as invalid
+                        // (returns -1), but PlayerCorpseNetworking.restoreToOriginalSlots() only checked >= 0
+                        // and called serverPlayer.getInventory().setItem(originalSlot, ...) directly - for a
+                        // stored value in 36-40 that writes straight into the player's live armor/offhand slot
+                        // instead of their general inventory. Clamp to -1 here so no consumer ever sees an
+                        // out-of-range value in the first place.
+                        corpse.setGeneralOriginalSlot(targetSlot, originalSlot >= 0 && originalSlot < 36 ? originalSlot : -1);
                      }
                   }
                }
