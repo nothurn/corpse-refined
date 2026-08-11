@@ -46,15 +46,85 @@ Pipeline per stage i in 0..8 (stage progress p = i/8):
      lower overall stage progress than torso-core pixels. Each pixel gets a
      small smooth transition band around its own threshold (not a hard
      step), so individual pixels still ramp in opacity rather than popping.
-  6. Ashed pixels are colored DUST_HIGHLIGHT (215, 210, 200) - a pale,
-     desaturated color - NOT the rejected warm EMBER_COLOR (210, 95, 30).
-     RECOVERY.md: "wieso sollte es glühen, wenn es eigentlich nur verfällt"
-     (why would it glow, when it's actually just decaying).
+  6. Ashed pixels are colored DUST_HIGHLIGHT - a pale, desaturated color -
+     NOT the rejected warm EMBER_COLOR (210, 95, 30). RECOVERY.md: "wieso
+     sollte es glühen, wenn es eigentlich nur verfällt" (why would it glow,
+     when it's actually just decaying).
 
 Output alpha at each pixel represents how "ashed" that pixel is at this
 stage - this is composited onto the skeleton texture via BlendedTextureCache
 (RGB shown = DUST_HIGHLIGHT, blended by alpha over the skeleton base), never
 rendered as its own separate transparent layer.
+
+--- 2026-08-11 retune: "reads as pale disconnected fragments, not coherent
+crumbling ash" (Noah confirmed this is the actual complaint - a visual LOOK
+problem, not the ash-pacing/timing issue already fixed in session
+2026-08-11c). Investigated concretely before changing anything (scratch
+scripts, not preserved - this environment cannot render Minecraft, only
+sample real pixel data and re-derive the generator's own arrays):
+
+  - Sampled ash_base.png (real vanilla skeleton.png pixel data, from the
+    BUG 3 fix) at the 5 UV regions the renderer actually samples: mean bone
+    RGB is (167, 167, 167), a fairly neutral mid-grey. The old
+    DUST_HIGHLIGHT (215, 210, 200) was 72.0 RGB-euclidean / +43 luma above
+    that - a large, stark jump from mid-grey bone to near-white on any pixel
+    that flips to full ash alpha. Confirmed this against the REAL composited
+    color (BlendedTextureCache.compositeOver's actual src-over-dst formula,
+    re-implemented and run against ash_base.png + the committed ash_2..
+    ash_5.png), not just the raw overlay color.
+  - Re-derived this script's own extremity_weight/equalized_noise arrays
+    (importable, since this generator is deterministic and seeded) and
+    traced alpha along columns running from an extremity region center
+    (HEAD_TOP crown, RIGHT_ARM_HAND) straight into the immediately adjacent
+    non-extremity pixels. Found a real, measurable seam: at stage 2 (of 8),
+    the whole HEAD_TOP region was already alpha ~1.0 (fully opaque dust)
+    while pixels 1-2px away in the core were still alpha 0.0 (completely
+    untouched bone) - a swing from 0 to 1 in about 1-2 pixels, not a
+    gradient. Measured properly (mean alpha of weight>=0.9 pixels minus mean
+    alpha of their weight==0 neighbors within 4px, across the whole canvas,
+    every stage): the old EXTREMITY_SHRINK=1.8/EXTREMITY_EARLY_BIAS=0.35
+    combo produced a max gap of 0.360 (out of 1.0) - both knobs compound
+    multiplicatively on the same weight=1.0 pixels (BIAS shifts their
+    threshold down ~35%, SHRINK simultaneously widens their transition
+    softness ~2.8x), so a deep-extremity pixel and its untouched neighbor
+    can be on opposite sides of a near-binary flip within the same stage.
+    This alone explains "disconnected fragments" independent of color: even
+    at matched grey tones, a hard alpha edge reads as a separate floating
+    piece.
+  - Swept EXTREMITY_SHRINK/EXTREMITY_EARLY_BIAS candidates numerically
+    against three invariants that must hold (extremities still ash ahead of
+    the torso core at every stage; per-pixel variance in extremity regions
+    stays well above 0, i.e. the historical "clamped flat block" bug from
+    RECOVERY.md point 2 does not come back; overall alpha progression stays
+    monotonic 0->8). SHRINK=1.0/BIAS=0.20 cut the max gap from 0.360 to
+    0.276 (a ~23% reduction, and the early-stage gaps that matter most for
+    "first visible ash" dropped even further - stage 0: 0.149->0.087, stage
+    1: 0.288->0.214) while holding both invariants (extremity-ahead-of-core
+    held at every stage with slack to spare; extremity variance at stage
+    4/6 went UP, not down, vs. the old values - if anything more per-pixel
+    grain survives, not less). Weakening EARLY_BIAS alone or both knobs
+    further (tested down to BIAS=0.15) broke the extremity-ahead-of-core
+    invariant at late stages - rejected.
+
+  Net fix, both applied together since the investigation found two separate,
+  independently-confirmed contributors to the same symptom:
+    DUST_HIGHLIGHT: (215, 210, 200) -> (188, 184, 176) - keeps the same pale,
+      desaturated, slightly-warm hue direction (still clearly reads as dust,
+      not painted-on grey), but the offset above real bone tone is now ~28
+      RGB-euclidean / +17 luma instead of ~72 / +43 - a ~60% reduction in
+      the color jump when a pixel flips to full ash.
+    EXTREMITY_SHRINK: 1.8 -> 1.0, EXTREMITY_EARLY_BIAS: 0.35 -> 0.20 - same
+      documented purpose (extremities ash first, extremity regions keep
+      per-pixel variance instead of clamping flat), less compounding, so the
+      extremity-vs-core boundary spans a visible transition band instead of
+      flipping almost the entire region to full opacity in 1-2 stages while
+      the immediately adjacent core is still untouched.
+
+  Still an untested visual judgment call, same as everything else in this
+  file - this environment cannot render Minecraft. The numbers above are
+  concrete, reproducible measurements of the actual generated pixel data,
+  not guesses, but whether the result now reads as coherent crumbling ash
+  in-game is Noah's call on the next playtest.
 
 Usage: python generate_ash_texture.py
 Requires: Pillow, numpy (pip install Pillow numpy)
@@ -70,10 +140,10 @@ WIDTH = 64
 HEIGHT = 64
 STAGE_COUNT = 9
 
-DUST_HIGHLIGHT = (215, 210, 200)
+DUST_HIGHLIGHT = (188, 184, 176)
 EDGE_SOFTNESS = 0.12
-EXTREMITY_SHRINK = 1.8
-EXTREMITY_EARLY_BIAS = 0.35
+EXTREMITY_SHRINK = 1.0
+EXTREMITY_EARLY_BIAS = 0.20
 NOISE_BLUR_RADIUS = 2
 RANDOM_SEED = 20260729
 
