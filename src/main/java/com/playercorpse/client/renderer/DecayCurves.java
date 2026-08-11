@@ -11,8 +11,30 @@ import net.minecraft.util.Mth;
  */
 final class DecayCurves {
    private static final float BUILD_EASE_FRACTION = 0.12F;
-   private static final float ASH_STABLE_DURATION_FRACTION = 0.82F;
-   private static final float ASH_STABLE_VISIBLE_PROGRESS_FRACTION = 0.12F;
+   /**
+    * Re-tuned 2026-08-11 (Noah's in-game report: "nothing happening, then
+    * sudden fragments, then rapid full crumble" - matched the pacing
+    * predicted from sampling ash_0/ash_1 alpha deltas the session before:
+    * with the old 0.82/0.12 split, most of the model changed 0-1/255 in
+    * alpha across the ENTIRE first 73.8s of a 90s default ASH_TICKS phase,
+    * since raw progress in [0, 0.82] only ever produced effective in
+    * [0, 0.12] - stage index (effective*8) never left stage 0. Old slope
+    * ratio between the two segments was (0.88/0.18)/(0.12/0.82) ~= 33.4x -
+    * a near-vertical cliff, not a gradual speed-up.
+    *
+    * New values keep the SAME two-segment shape RECOVERY.md asks for ("long
+    * stable hold that suddenly gives way, like a sand structure" - a real
+    * rate change is still the intended effect, see ashCollapseCurve below),
+    * just far less extreme: slope ratio (0.70/0.40)/(0.30/0.60) = 3.5x.
+    * effective=0.30 (stage ~2.4 of 8) is now reached by 60% of real
+    * duration (54s of 90s default) instead of effective=0.12 (stage <1) at
+    * 82% (73.8s) - visible stage transitions now start well within the
+    * first minute rather than being invisible until the last 16 seconds.
+    * The final 40% of duration still visibly accelerates (3.5x the first
+    * segment's rate) to keep the "give way" payoff, just not a 33x cliff.
+    */
+   private static final float ASH_STABLE_DURATION_FRACTION = 0.6F;
+   private static final float ASH_STABLE_VISIBLE_PROGRESS_FRACTION = 0.3F;
 
    /**
     * Structural-visibility thresholds, in terms of the SAME effective
@@ -60,13 +82,15 @@ final class DecayCurves {
    }
 
    /**
-    * Remaps raw ASH-phase progress so the first 82% of the phase's real
-    * duration only produces 12% of visible collapse, with the remaining 88%
-    * concentrated into the last 18% - reads as a long stable hold that
-    * suddenly gives way, like a sand structure, rather than a steady shrink.
-    * Deliberately a hard slope change at the 82% breakpoint, not smoothed -
-    * unlike buildAlphaCurve, an abrupt rate change here IS the intended
-    * effect, not something to avoid.
+    * Remaps raw ASH-phase progress so the first ASH_STABLE_DURATION_FRACTION
+    * of the phase's real duration produces ASH_STABLE_VISIBLE_PROGRESS_FRACTION
+    * of visible collapse, with the remaining duration covering the rest -
+    * reads as a hold that gives way faster toward the end, like a sand
+    * structure, rather than a steady shrink. Deliberately a hard slope
+    * change at the breakpoint, not smoothed - unlike buildAlphaCurve, a rate
+    * change here IS the intended effect, not something to avoid. See the
+    * constants' own doc comment for why these specific values, not the
+    * original, much more extreme 0.82/0.12 split.
     */
    static float ashCollapseCurve(float rawProgress) {
       rawProgress = Mth.clamp(rawProgress, 0.0F, 1.0F);
