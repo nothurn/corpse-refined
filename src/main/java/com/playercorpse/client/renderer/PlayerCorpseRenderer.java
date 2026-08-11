@@ -74,6 +74,15 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    private static final int ASH_STAGE_COUNT = 9;
    private static final ResourceLocation[] ASH_STAGE_TEXTURES = new ResourceLocation[9];
    private final Set<Integer> loggedHeldItemIds = new HashSet<>();
+   /**
+    * TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent, remove once
+    * the ash-texture bug is actually root-caused from Noah's next in-game
+    * log. Tracks the last decay phase logged per corpse so a phase change
+    * (and in particular, whether the client ever actually observes ASH at
+    * all) shows up in logs/latest.log exactly once per transition instead of
+    * once per frame.
+    */
+   private static final Map<Integer, DecayPhase> DIAG_LAST_LOGGED_PHASE = new HashMap<>();
    private final PlayerModel<PlayerCorpseEntity> wideModel = (PlayerModel<PlayerCorpseEntity>)this.model;
    private final PlayerModel<PlayerCorpseEntity> slimModel;
    private final HumanoidModel<PlayerCorpseEntity> skeletonModel;
@@ -162,6 +171,14 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          LOGGER.info("[PlayerCorpse-DEBUG] corpse {} client-side getItemBySlot(MAINHAND)={}", entity.getId(), entity.getItemBySlot(EquipmentSlot.MAINHAND));
       }
 
+      DecayPhase phase = entity.getDecayPhase();
+      if (DIAG_LAST_LOGGED_PHASE.get(entity.getId()) != phase) {
+         DIAG_LAST_LOGGED_PHASE.put(entity.getId(), phase);
+         LOGGER.info(
+            "[PlayerCorpse-DIAG-ASH] corpse {} client-side decay phase changed to {} (progress={})", entity.getId(), phase, entity.getPhaseProgress()
+         );
+      }
+
       super.render(entity, entityYaw, partialTick, poseStack, bufferSource, packedLight);
    }
 
@@ -195,15 +212,30 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
     * section 7) means in practice: there is no additional draw call at all,
     * only the single base draw's texture changes.
     */
+   private static final Set<Integer> DIAG_LOGGED_ASH_TEXTURE_ENTITY_IDS = new HashSet<>();
+
    private static ResourceLocation ashTextureFor(PlayerCorpseEntity entity) {
       float effective = DecayCurves.ashCollapseCurve(entity.getPhaseProgress());
       float scaled = effective * 8.0F;
       int stageLow = Mth.clamp((int)scaled, 0, 7);
       int stageHigh = Mth.clamp(stageLow + 1, 0, 8);
       float frac = Mth.clamp(scaled - stageLow, 0.0F, 1.0F);
-      return BlendedTextureCache.getOrCreate(
+      ResourceLocation blended = BlendedTextureCache.getOrCreate(
          entity.getId(), "ash", ASH_STAGE_TEXTURES[stageLow], ASH_STAGE_TEXTURES[stageHigh], frac, ASH_BASE_TEXTURE
       );
+      // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent. First call
+      // per entity proves ashTextureFor() actually executes at all, and logs
+      // the exact base-texture ResourceLocation passed to BlendedTextureCache
+      // - the only way to confirm from a real log (not from re-reading the
+      // source) that this is really ash_base.png and not something else.
+      if (DIAG_LOGGED_ASH_TEXTURE_ENTITY_IDS.add(entity.getId())) {
+         LOGGER.info(
+            "[PlayerCorpse-DIAG-ASH] ashTextureFor() called for corpse {} - phase={} baseTexture={} stageLow={} stageHigh={} frac={} -> blended result={}",
+            entity.getId(), entity.getDecayPhase(), ASH_BASE_TEXTURE, ASH_STAGE_TEXTURES[stageLow], ASH_STAGE_TEXTURES[stageHigh], frac, blended
+         );
+      }
+
+      return blended;
    }
 
    private static PlayerSkin resolveSkin(PlayerCorpseEntity entity) {

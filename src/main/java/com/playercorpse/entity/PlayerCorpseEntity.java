@@ -1,5 +1,6 @@
 package com.playercorpse.entity;
 
+import com.mojang.logging.LogUtils;
 import com.playercorpse.PlayerCorpseConfig;
 import com.playercorpse.PlayerCorpseCorpseTracker;
 import com.playercorpse.menu.PlayerCorpseMenu;
@@ -39,8 +40,10 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import org.slf4j.Logger;
 
 public class PlayerCorpseEntity extends LivingEntity {
+   private static final Logger LOGGER = LogUtils.getLogger();
    public static final int CONTAINER_SIZE = 36;
    private static final EquipmentSlot[] EQUIPMENT_SLOT_ORDER = new EquipmentSlot[]{
       EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET, EquipmentSlot.OFFHAND
@@ -309,12 +312,32 @@ public class PlayerCorpseEntity extends LivingEntity {
     * either container.
     */
    private void completeAshAndDiscard() {
+      // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent, remove once
+      // BUG 4 (floating grave marker) is actually root-caused from Noah's next
+      // log. Proves this method runs at all, independent of whether a marker
+      // ends up spawned.
+      LOGGER.info(
+         "[PlayerCorpse-DIAG-GRAVE] completeAshAndDiscard() reached for corpse {} - inventoryEmpty={} corpse.getY()={} blockPosition()={}",
+         this.getId(), this.isInventoryEmpty(), this.getY(), this.blockPosition()
+      );
       if (!this.isInventoryEmpty() && this.level() instanceof ServerLevel serverLevel) {
+         double groundY = findGroundY(serverLevel, this.blockPosition());
          PlayerGraveMarkerEntity marker = new PlayerGraveMarkerEntity(PlayerCorpseEntities.GRAVE_MARKER.get(), serverLevel);
-         marker.setPos(this.getX(), findGroundY(serverLevel, this.blockPosition()), this.getZ());
+         marker.setPos(this.getX(), groundY, this.getZ());
          marker.setYRot(this.getYRot());
          marker.transferFrom(this.inventory, this.equipment, this.generalOriginalSlot);
          serverLevel.addFreshEntity(marker);
+         // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent. Logs all
+         // three Y values from BUG 4's fix chain in one line: the corpse's own
+         // Y (the old, discredited source), what findGroundY() actually
+         // computed, and the marker's real Y after setPos() + addFreshEntity()
+         // - so a mismatch between "findGroundY() returned" and "marker ended
+         // up at" (e.g. something repositioning it afterward) is visible
+         // directly in the log instead of only inferred from re-reading code.
+         LOGGER.info(
+            "[PlayerCorpse-DIAG-GRAVE] marker {} spawned for corpse {} - corpse.getY()={} findGroundY()={} marker.getY() after spawn={}",
+            marker.getId(), this.getId(), this.getY(), groundY, marker.getY()
+         );
       }
 
       this.discard();

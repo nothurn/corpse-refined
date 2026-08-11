@@ -1,5 +1,6 @@
 package com.playercorpse.entity;
 
+import com.mojang.logging.LogUtils;
 import com.playercorpse.menu.PlayerCorpseMenu;
 import com.playercorpse.registry.PlayerCorpseMenus;
 import java.util.Arrays;
@@ -24,6 +25,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
+import org.slf4j.Logger;
 
 /**
  * Left behind when a PlayerCorpseEntity finishes the ASH phase still holding
@@ -37,9 +39,11 @@ import net.minecraft.world.level.Level;
  * loot GUI for free.
  */
 public class PlayerGraveMarkerEntity extends LivingEntity {
+   private static final Logger LOGGER = LogUtils.getLogger();
    private final SimpleContainer inventory = new SimpleContainer(PlayerCorpseEntity.CONTAINER_SIZE);
    private final SimpleContainer equipment = new SimpleContainer(PlayerCorpseEntity.EQUIPMENT_SIZE);
    private final int[] generalOriginalSlot = new int[PlayerCorpseEntity.CONTAINER_SIZE];
+   private boolean diagLoggedFirstTick;
 
    public PlayerGraveMarkerEntity(EntityType<? extends PlayerGraveMarkerEntity> type, Level level) {
       super(type, level);
@@ -47,6 +51,29 @@ public class PlayerGraveMarkerEntity extends LivingEntity {
       this.setNoGravity(true);
       this.noPhysics = true;
       this.blocksBuilding = false;
+   }
+
+   /**
+    * TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent, remove once
+    * BUG 4 (floating grave marker) is actually root-caused from Noah's next
+    * log. Fires exactly once per marker per server session, whether the
+    * marker was just spawned by completeAshAndDiscard() this tick or was
+    * loaded from NBT from a previous session. Cross-reference the entity id
+    * here against the "[PlayerCorpse-DIAG-GRAVE] marker N spawned" line: if
+    * this id was never logged as freshly spawned, this marker predates the
+    * current fix and its position is whatever old, possibly-still-wrong Y
+    * was written to disk before BUG 4 was patched - reloading it proves
+    * nothing about whether findGroundY() itself works.
+    */
+   public void tick() {
+      super.tick();
+      if (!this.diagLoggedFirstTick && this.level() instanceof net.minecraft.server.level.ServerLevel) {
+         this.diagLoggedFirstTick = true;
+         LOGGER.info(
+            "[PlayerCorpse-DIAG-GRAVE] marker {} first server tick this session - pos=({}, {}, {})",
+            this.getId(), this.getX(), this.getY(), this.getZ()
+         );
+      }
    }
 
    /**

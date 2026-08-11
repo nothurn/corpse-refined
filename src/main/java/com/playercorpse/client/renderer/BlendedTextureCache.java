@@ -179,10 +179,17 @@ public final class BlendedTextureCache {
          Resource resource = Minecraft.getInstance().getResourceManager().getResourceOrThrow(location);
 
          try (InputStream stream = resource.open()) {
-            return NativeImage.read(stream);
+            NativeImage image = NativeImage.read(stream);
+            // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent. Proves
+            // a real image with real pixel data loaded, as opposed to silently
+            // falling into the catch block below and returning a blank 1x1
+            // fallback (which would look exactly like "the fix didn't take" in
+            // game while the source code looks correct).
+            LOGGER.info("[PlayerCorpse-DIAG-TEXLOAD] loaded {} successfully: {}x{}", location, image.getWidth(), image.getHeight());
+            return image;
          }
       } catch (IOException e) {
-         LOGGER.warn("[BlendedTextureCache] could not load {}: {}", location, e.toString());
+         LOGGER.warn("[PlayerCorpse-DIAG-TEXLOAD] FAILED to load {} - falling back to blank 1x1 image: {}", location, e.toString());
          return new NativeImage(1, 1, true);
       }
    }
