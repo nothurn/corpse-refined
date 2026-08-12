@@ -61,9 +61,13 @@ Requires a local copy of vanilla skeleton.png - NOT committed to this repo
 Usage: python generate_ash_base_texture.py <path-to-vanilla-skeleton.png>
 Requires: Pillow (pip install Pillow)
 """
+import random
 import sys
 
 from PIL import Image
+
+PILE_NOISE_SEED = 20260812
+PILE_NOISE_SPREAD = 14  # +/- per channel, small enough to stay clearly one solid pile color
 
 OUT_PATH = "../src/main/resources/assets/playercorpse/textures/entity/ash_base.png"
 
@@ -81,6 +85,24 @@ LEFT_LEG_DST = (16, 48, 8, 14)  # PlayerModel-only texOffs(16,48)
 
 COPY_REGIONS = (HEAD, HAT, BODY, RIGHT_ARM, RIGHT_LEG)
 
+# 2026-08-12, new: reserved swatch for PlayerCorpseRenderer's "ash_pile" ModelPart
+# (buildAshSkeletonRoot, texOffs(34,3), box 6x3x6 -> UV footprint 24x9 =
+# 2*(6+6) wide, 3+6 tall, matching CubeListBuilder's standard box-UV formula).
+# Deliberately sits INSIDE the hat cube's own (32,0)-(64,16) UV rectangle - safe
+# because the hat/head is always hidden (ASH_HIDE_HEAD_AT) well before the pile
+# starts appearing (ASH_PILE_APPEAR_START), so the two are never visible at the
+# same time and never compete for the same pixels on screen, only in the atlas.
+# Painted with an OPAQUE, DUST_HIGHLIGHT-adjacent color here so the pile texture
+# exists independent of generate_ash_texture.py's erosion sweep - see that
+# script for the matching change that keeps this exact patch at alpha=0 in
+# every ash_N.png stage overlay, so erodeOver's erosion formula never touches
+# it (the pile is meant to be what's left AFTER erosion, not itself erodable).
+PILE_PATCH = (34, 3, 24, 9)
+# Same hue direction as DUST_HIGHLIGHT (188,184,176) but a bit darker/more
+# saturated - a "settled pile of debris" should read a little denser/greyer
+# than the pale in-progress dusting color, not identical to it.
+PILE_COLOR = (150, 145, 136, 255)
+
 
 def copy_region(src, dst, box):
     x0, y0, w, h = box
@@ -92,6 +114,24 @@ def mirror_region(src, dst, src_box, dst_box):
     dx0, dy0, _, _ = dst_box
     region = src.crop((sx0, sy0, sx0 + sw, sy0 + sh)).transpose(Image.FLIP_LEFT_RIGHT)
     dst.paste(region, (dx0, dy0))
+
+
+def paint_pile_patch(dst, box, color):
+    """Fills box with color, plus small per-pixel noise so the pile reads as a
+    textured mound of debris rather than a flat plastic-looking block - still
+    clearly one solid, opaque color at a glance, since PILE_NOISE_SPREAD is
+    small relative to the color values themselves."""
+    x0, y0, w, h = box
+    rng = random.Random(PILE_NOISE_SEED)
+    pixels = dst.load()
+    r0, g0, b0, a0 = color
+    for y in range(y0, y0 + h):
+        for x in range(x0, x0 + w):
+            jitter = rng.randint(-PILE_NOISE_SPREAD, PILE_NOISE_SPREAD)
+            r = max(0, min(255, r0 + jitter))
+            g = max(0, min(255, g0 + jitter))
+            b = max(0, min(255, b0 + jitter))
+            pixels[x, y] = (r, g, b, a0)
 
 
 def main():
@@ -110,6 +150,7 @@ def main():
 
     mirror_region(skeleton, out, RIGHT_ARM, LEFT_ARM_DST)
     mirror_region(skeleton, out, RIGHT_LEG, LEFT_LEG_DST)
+    paint_pile_patch(out, PILE_PATCH, PILE_COLOR)
 
     out.save(OUT_PATH)
     print(f"wrote {OUT_PATH}")

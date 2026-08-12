@@ -60,9 +60,9 @@ public final class PlayerCorpseConfig {
          new String[]{
             "Ticks for the bare skeleton to crumble to ash and the corpse to be removed. If any",
             "items remain at that point, a PlayerGraveMarkerEntity is left behind holding them -",
-            "see RECOVERY.md section 7. Time is concentrated at the end (see ashCollapseCurve in",
-            "the renderer) so it reads as a long stable hold that suddenly collapses, not a steady",
-            "shrink. Default of 1800 is 1.5 real-world minutes.",
+            "see RECOVERY.md section 7. Material is lost continuously across the whole phase",
+            "(erosion-based texture alpha, same mechanism EROSION uses), not held stable then",
+            "suddenly collapsed. Default of 1800 is 1.5 real-world minutes.",
             "Total default time from fresh corpse to ash (sum of all six phases) is 12,600 ticks",
             "= 10.5 real-world minutes."
          }

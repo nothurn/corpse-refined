@@ -33,6 +33,7 @@ RIGHT_ARM = (40, 16, 8, 14)
 RIGHT_LEG = (0, 16, 8, 14)
 LEFT_ARM_DST = (32, 48, 8, 14)
 LEFT_LEG_DST = (16, 48, 8, 14)
+PILE_PATCH = (34, 3, 24, 9)
 
 
 def region_pixels(img, box):
@@ -71,6 +72,18 @@ def main():
     left_leg_px = mirrored_pixels(img, LEFT_LEG_DST)
     assert right_leg_px == left_leg_px, "left_leg is not an exact horizontal mirror of right_leg"
     print("OK: left_leg is an exact horizontal mirror of right_leg")
+
+    # 2026-08-12, new: the reserved ash-pile UV patch (inside the hat rectangle, but never
+    # simultaneously visible with it - see PlayerCorpseRenderer.buildAshSkeletonRoot) must be
+    # fully opaque here, unlike the rest of the hat region - it needs real, stable pixel data
+    # for the pile to actually be visible once ashPile scales in.
+    pile_pixels = region_pixels(img, PILE_PATCH)
+    non_transparent = sum(1 for p in pile_pixels if p[3] != 0)
+    assert non_transparent == len(pile_pixels), (
+        f"ash_pile UV patch is not fully opaque - {non_transparent}/{len(pile_pixels)} non-transparent, "
+        "the pile would be partially invisible"
+    )
+    print(f"OK: ash_pile UV patch is fully opaque ({non_transparent}/{len(pile_pixels)} px)")
 
     print()
     print("All structural UV checks pass. Still unverified: the actual rendered")

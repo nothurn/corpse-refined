@@ -47,6 +47,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.util.FastColor.ARGB32;
 import net.minecraft.world.entity.EquipmentSlot;
 import org.slf4j.Logger;
+import javax.annotation.Nullable;
 
 public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntity, HumanoidModel<PlayerCorpseEntity>> {
    private static final Logger LOGGER = LogUtils.getLogger();
@@ -136,8 +137,8 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    public PlayerCorpseRenderer(Context context) {
       super(context, new PlayerCorpseRenderer.StaticPlayerModel(context.bakeLayer(ModelLayers.PLAYER), false), 0.0F);
       this.slimModel = new PlayerCorpseRenderer.StaticPlayerModel(context.bakeLayer(ModelLayers.PLAYER_SLIM), true);
-      this.skeletonModel = new PlayerCorpseRenderer.StaticHumanoidModel(context.bakeLayer(ModelLayers.SKELETON));
-      this.ashSkeletonModel = new PlayerCorpseRenderer.StaticHumanoidModel(buildAshSkeletonRoot());
+      this.skeletonModel = new PlayerCorpseRenderer.StaticHumanoidModel(context.bakeLayer(ModelLayers.SKELETON), false);
+      this.ashSkeletonModel = new PlayerCorpseRenderer.StaticHumanoidModel(buildAshSkeletonRoot(), true);
       this.addLayer(new PlayerCorpseRenderer.CorpseShroudLayer(this, this.wideModel, this.slimModel));
       ModelManager modelManager = context.getModelManager();
       this.addLayer(
@@ -171,6 +172,33 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
     * ashSkeletonModel field comment for why. Geometry is byte-for-byte
     * identical to vanilla's skeleton shape; only the baked UV denominator
     * differs.
+    *
+    * 2026-08-12, new: also adds "ash_pile", a small flattened box
+    * representing what's left once the skeleton has essentially fully
+    * eroded/vanished (see DecayCurves.pileAppearT / applyAshDeformation
+    * below) - the previously-missing "small ash pile on the ground" state
+    * before the grave marker spawns. Positioned at PartPose y=24: real
+    * HumanoidModel.createMesh() (confirmed from the decompiled source, not
+    * guessed) pivots right_leg/left_leg at y=12 with a 12-unit-tall box
+    * extending DOWN from there (y increases downward in this model space,
+    * confirmed from head's own box - it sits ABOVE the y=0 shoulder line at
+    * y=-8..0) - so 12+12=24 is exactly where the real skeleton's feet
+    * already touch the ground. The pile's own box (-3,-3,-3, 6,3,6) sits
+    * with its bottom face exactly at that same y=24 ground line, not
+    * floating or sunk in.
+    *
+    * Textured via texOffs(34,3) - a 24x9 UV footprint (2*(6+6) wide,
+    * 3+6 tall, matching CubeListBuilder's standard box-UV formula) that
+    * sits entirely inside the hat cube's own (32,0)-(64,16) UV rectangle
+    * but is never simultaneously in use with it: the hat is always long
+    * hidden (ASH_HIDE_HEAD_AT=0.60) before the pile starts appearing
+    * (ASH_PILE_APPEAR_START=0.80). generate_ash_base_texture.py paints a
+    * real opaque swatch there and generate_ash_texture.py deliberately
+    * keeps that same patch at alpha=0 in every ash_N.png stage, so
+    * erodeOver's erosion formula never touches it - the pile texture is
+    * exempt from the same erosion that removes everything else, since it's
+    * meant to be what's left AFTER that erosion finishes, not subject to it
+    * itself.
     */
    private static ModelPart buildAshSkeletonRoot() {
       MeshDefinition mesh = HumanoidModel.createMesh(CubeDeformation.NONE, 0.0F);
@@ -188,6 +216,9 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
       );
       root.addOrReplaceChild(
          "left_leg", CubeListBuilder.create().texOffs(0, 16).mirror().addBox(-1.0F, 0.0F, -1.0F, 2.0F, 12.0F, 2.0F), PartPose.offset(2.0F, 12.0F, 0.0F)
+      );
+      root.addOrReplaceChild(
+         "ash_pile", CubeListBuilder.create().texOffs(34, 3).addBox(-3.0F, -3.0F, -3.0F, 6.0F, 3.0F, 6.0F), PartPose.offset(0.0F, 24.0F, 0.0F)
       );
       return LayerDefinition.create(mesh, 64, 64).bakeRoot();
    }
@@ -228,6 +259,21 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
       part.yScale = scale;
       part.zScale = scale;
       part.visible = !fullyHidden;
+   }
+
+   /**
+    * Inverse of setVanishing: scales a part UP from (near) zero as t goes
+    * 0->1, becoming visible as soon as it has any real presence. Used only
+    * by the ash pile (see applyAshDeformation) - unlike every other part in
+    * this file, the pile starts hidden and grows in rather than starting
+    * visible and shrinking away.
+    */
+   private static void setAppearing(ModelPart part, float t) {
+      float scale = Math.max(t, 0.001F);
+      part.xScale = scale;
+      part.yScale = scale;
+      part.zScale = scale;
+      part.visible = t > 0.0F;
    }
 
    private static PlayerModel<PlayerCorpseEntity> choosePlayerModel(
@@ -300,16 +346,21 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    }
 
    /**
-    * Ash is composited directly onto the skeleton texture and returned as
-    * THE base texture for this tick, rather than added as a separate
+    * Ash is eroded directly into the skeleton texture and returned as THE
+    * base texture for this tick, rather than added as a separate
     * RenderLayer - this is what "no separate transparent layer" (RECOVERY.md
     * section 7) means in practice: there is no additional draw call at all,
-    * only the single base draw's texture changes.
+    * only the single base draw's texture changes. Stage selection is a
+    * direct linear map of raw phase progress (2026-08-12 redesign - no
+    * ashCollapseCurve remap anymore), the exact same mapping
+    * CorpseShroudLayer already uses for EROSION below, so material loss
+    * runs continuously across the whole phase instead of being concentrated
+    * late.
     */
    private static final Set<Integer> DIAG_LOGGED_ASH_TEXTURE_ENTITY_IDS = new HashSet<>();
 
    private static ResourceLocation ashTextureFor(PlayerCorpseEntity entity) {
-      float effective = DecayCurves.ashCollapseCurve(entity.getPhaseProgress());
+      float effective = entity.getPhaseProgress();
       float scaled = effective * 8.0F;
       int stageLow = Mth.clamp((int)scaled, 0, 7);
       int stageHigh = Mth.clamp(stageLow + 1, 0, 8);
@@ -589,8 +640,22 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    }
 
    private static class StaticHumanoidModel extends HumanoidModel<PlayerCorpseEntity> {
-      StaticHumanoidModel(ModelPart root) {
+      /**
+       * Only non-null for ashSkeletonModel (hasAshPile=true) - skeletonModel
+       * is baked from vanilla's own ModelLayers.SKELETON, which has no
+       * "ash_pile" child at all, and ModelPart.getChild throws (does not
+       * return null) for a missing name. resetAshState/applyAshDeformation
+       * both run on BOTH StaticHumanoidModel instances (setupAnim is called
+       * on whichever model is currently assigned as this.model - see
+       * PlayerCorpseRenderer.render()'s swap), so every use of this field
+       * must stay null-guarded.
+       */
+      @Nullable
+      private final ModelPart ashPile;
+
+      StaticHumanoidModel(ModelPart root, boolean hasAshPile) {
          super(root);
+         this.ashPile = hasAshPile ? root.getChild("ash_pile") : null;
       }
 
       public void setupAnim(PlayerCorpseEntity entity, float limbSwing, float limbSwingAmount, float ageInTicks, float netHeadYaw, float headPitch) {
@@ -605,7 +670,10 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          // visibly leak into a different corpse's render call.
          this.resetAshState();
          if (entity.getDecayPhase() == DecayPhase.ASH) {
-            this.applyAshDeformation(DecayCurves.ashCollapseCurve(entity.getPhaseProgress()));
+            // 2026-08-12: raw phase progress directly, no ashCollapseCurve remap - see
+            // DecayCurves' class doc for why (continuous material loss across the whole
+            // phase, not a late-concentrated collapse).
+            this.applyAshDeformation(entity.getPhaseProgress());
          }
       }
 
@@ -624,6 +692,10 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          this.leftLeg.xScale = this.leftLeg.yScale = this.leftLeg.zScale = 1.0F;
          this.rightLeg.xScale = this.rightLeg.yScale = this.rightLeg.zScale = 1.0F;
          this.body.y = 0.0F;
+         if (this.ashPile != null) {
+            this.ashPile.visible = false;
+            this.ashPile.xScale = this.ashPile.yScale = this.ashPile.zScale = 0.001F;
+         }
       }
 
       /**
@@ -672,6 +744,13 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          this.body.y += 0.5F * bodyT;
          this.body.xRot += 0.15F * bodyT;
          PlayerCorpseRenderer.setVanishing(this.body, bodyT, effective >= DecayCurves.ASH_HIDE_BODY_AT);
+
+         // 2026-08-12, new: the ash pile scales in as the body finishes vanishing, so there's an
+         // actual "small ash pile on the ground" end state instead of the model just fully
+         // disappearing with no visual bridge to the grave marker that spawns right after.
+         if (this.ashPile != null) {
+            PlayerCorpseRenderer.setAppearing(this.ashPile, DecayCurves.pileAppearT(effective));
+         }
       }
    }
 

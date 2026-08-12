@@ -11,48 +11,64 @@ import net.minecraft.util.Mth;
  */
 final class DecayCurves {
    private static final float BUILD_EASE_FRACTION = 0.12F;
-   /**
-    * Re-tuned 2026-08-11 (Noah's in-game report: "nothing happening, then
-    * sudden fragments, then rapid full crumble" - matched the pacing
-    * predicted from sampling ash_0/ash_1 alpha deltas the session before:
-    * with the old 0.82/0.12 split, most of the model changed 0-1/255 in
-    * alpha across the ENTIRE first 73.8s of a 90s default ASH_TICKS phase,
-    * since raw progress in [0, 0.82] only ever produced effective in
-    * [0, 0.12] - stage index (effective*8) never left stage 0. Old slope
-    * ratio between the two segments was (0.88/0.18)/(0.12/0.82) ~= 33.4x -
-    * a near-vertical cliff, not a gradual speed-up.
-    *
-    * New values keep the SAME two-segment shape RECOVERY.md asks for ("long
-    * stable hold that suddenly gives way, like a sand structure" - a real
-    * rate change is still the intended effect, see ashCollapseCurve below),
-    * just far less extreme: slope ratio (0.70/0.40)/(0.30/0.60) = 3.5x.
-    * effective=0.30 (stage ~2.4 of 8) is now reached by 60% of real
-    * duration (54s of 90s default) instead of effective=0.12 (stage <1) at
-    * 82% (73.8s) - visible stage transitions now start well within the
-    * first minute rather than being invisible until the last 16 seconds.
-    * The final 40% of duration still visibly accelerates (3.5x the first
-    * segment's rate) to keep the "give way" payoff, just not a 33x cliff.
-    */
-   private static final float ASH_STABLE_DURATION_FRACTION = 0.6F;
-   private static final float ASH_STABLE_VISIBLE_PROGRESS_FRACTION = 0.3F;
 
    /**
-    * Structural-visibility thresholds, in terms of the SAME effective
-    * (post-ashCollapseCurve) progress value that drives the texture blend -
-    * RECOVERY.md section 7 point 5 is explicit that pose deformation must
-    * use this one timeline, not a second independent one. Order matches
-    * "Gliedmaßen -> Kopf -> Körper": limbs vanish first, then head, then
-    * body last (body is what "bleibt als letztes stehen"). Exact numeric
-    * spacing is my own judgment call - RECOVERY.md names the three
-    * thresholds and their order but not specific values - chosen so each
-    * part's own 0.22-wide ramp window doesn't finish before the previous
-    * part's window starts, so the sequence reads as continuous rather than
-    * having a dead gap. UNVERIFIED visually - flag for a real in-game look.
+    * 2026-08-12 mechanism redesign - the previous "long stable hold, then
+    * sudden collapse" ashCollapseCurve (0.6/0.3 split, re-tuned from an even
+    * more extreme 0.82/0.12 in the session before this one) is REMOVED, not
+    * re-tuned again. Noah's stated expectation: the skeleton should
+    * continuously LOSE material over the WHOLE ash phase, the same way
+    * EROSION continuously erodes the shroud - not hold-then-collapse. Every
+    * ash-phase timeline (texture erosion stage selection in
+    * PlayerCorpseRenderer.ashTextureFor, and the structural
+    * thresholds/ashPoseT below) now runs directly off raw
+    * entity.getPhaseProgress(), the exact same linear mapping
+    * CorpseShroudLayer already uses for EROSION's own stage selection - no
+    * remap function at all. See BlendedTextureCache.erodeOver for the other
+    * half of this redesign: the texture itself now actually loses alpha
+    * (material erosion) instead of an opaque color overlay building up,
+    * which is what let a "long stable hold" ever look motionless in the
+    * first place - a genuinely continuous per-pixel erosion signal doesn't
+    * need artificial temporal concentration to read as "something is always
+    * happening".
     */
-   static final float ASH_HIDE_LIMBS_AT = 0.55F;
-   static final float ASH_HIDE_HEAD_AT = 0.75F;
-   static final float ASH_HIDE_BODY_AT = 0.95F;
+   /**
+    * Structural-visibility thresholds, now in terms of raw
+    * entity.getPhaseProgress() directly (see class doc above - no
+    * intermediate remap). Order matches "Gliedmaßen -> Kopf -> Körper":
+    * limbs vanish first, then head, then body last (body is what "bleibt
+    * als letztes stehen"). Re-tuned 2026-08-12: spread EVENLY across the
+    * whole phase (was 0.55/0.75/0.95, clustered in the last 45%) instead of
+    * concentrated late - starts at 13% of real duration instead of 33%, so
+    * structural loss is visible well within the first third of the phase,
+    * not saved for the end. Exact numeric spacing is still my own judgment
+    * call - RECOVERY.md names the three thresholds and their order but not
+    * specific values - chosen so each part's own 0.22-wide ramp window
+    * doesn't finish before the previous part's window starts (continuous
+    * sequence, no dead gap) and BODY_AT leaves room before 1.0 for the ash
+    * pile (see ASH_PILE_APPEAR_START below) to actually be visible before
+    * the corpse discards. UNVERIFIED visually - flag for a real in-game
+    * look.
+    */
+   static final float ASH_HIDE_LIMBS_AT = 0.35F;
+   static final float ASH_HIDE_HEAD_AT = 0.60F;
+   static final float ASH_HIDE_BODY_AT = 0.85F;
    private static final float ASH_POSE_RAMP_WINDOW = 0.22F;
+
+   /**
+    * 2026-08-12, new: nothing previously represented "a small ash pile
+    * remains" - the model just fully vanished, and the grave marker then
+    * appeared with no visual bridge between the two. ashPile (see
+    * PlayerCorpseRenderer.buildAshSkeletonRoot/applyAshDeformation) scales
+    * in over this window. Starts BEFORE ASH_HIDE_BODY_AT completes (0.85)
+    * so the body's own vanish and the pile's appearance overlap into a
+    * crossfade rather than leaving a gap, and ends at 0.95, leaving the
+    * final 5% of the phase (~4.5s of the 90s default ASH_TICKS) as "fully
+    * formed pile, nothing else" before completeAshAndDiscard() fires and
+    * the grave marker spawns.
+    */
+   private static final float ASH_PILE_APPEAR_START = 0.80F;
+   private static final float ASH_PILE_APPEAR_END = 0.95F;
 
    private DecayCurves() {
    }
@@ -82,23 +98,22 @@ final class DecayCurves {
    }
 
    /**
-    * Remaps raw ASH-phase progress so the first ASH_STABLE_DURATION_FRACTION
-    * of the phase's real duration produces ASH_STABLE_VISIBLE_PROGRESS_FRACTION
-    * of visible collapse, with the remaining duration covering the rest -
-    * reads as a hold that gives way faster toward the end, like a sand
-    * structure, rather than a steady shrink. Deliberately a hard slope
-    * change at the breakpoint, not smoothed - unlike buildAlphaCurve, a rate
-    * change here IS the intended effect, not something to avoid. See the
-    * constants' own doc comment for why these specific values, not the
-    * original, much more extreme 0.82/0.12 split.
+    * 0 before ASH_PILE_APPEAR_START, ramps to 1 by ASH_PILE_APPEAR_END via
+    * plain smoothstep - drives the ash pile's own scale-in (see
+    * PlayerCorpseRenderer.applyAshDeformation). Deliberately a separate,
+    * explicit window rather than reusing ashPoseT: ashPoseT's "ramp UP TO a
+    * hideAt threshold" semantics are about a part finishing its deformation
+    * right as it disappears; this is the inverse (something new growing
+    * in), clearer as its own small function than as a repurposed call.
     */
-   static float ashCollapseCurve(float rawProgress) {
-      rawProgress = Mth.clamp(rawProgress, 0.0F, 1.0F);
-      if (rawProgress <= ASH_STABLE_DURATION_FRACTION) {
-         return rawProgress / ASH_STABLE_DURATION_FRACTION * ASH_STABLE_VISIBLE_PROGRESS_FRACTION;
+   static float pileAppearT(float rawProgress) {
+      if (rawProgress <= ASH_PILE_APPEAR_START) {
+         return 0.0F;
+      } else if (rawProgress >= ASH_PILE_APPEAR_END) {
+         return 1.0F;
       } else {
-         float t = (rawProgress - ASH_STABLE_DURATION_FRACTION) / (1.0F - ASH_STABLE_DURATION_FRACTION);
-         return ASH_STABLE_VISIBLE_PROGRESS_FRACTION + t * (1.0F - ASH_STABLE_VISIBLE_PROGRESS_FRACTION);
+         float u = (rawProgress - ASH_PILE_APPEAR_START) / (ASH_PILE_APPEAR_END - ASH_PILE_APPEAR_START);
+         return u * u * (3.0F - 2.0F * u);
       }
    }
 

@@ -51,10 +51,16 @@ Pipeline per stage i in 0..8 (stage progress p = i/8):
      sollte es glühen, wenn es eigentlich nur verfällt" (why would it glow,
      when it's actually just decaying).
 
-Output alpha at each pixel represents how "ashed" that pixel is at this
-stage - this is composited onto the skeleton texture via BlendedTextureCache
-(RGB shown = DUST_HIGHLIGHT, blended by alpha over the skeleton base), never
-rendered as its own separate transparent layer.
+Output alpha at each pixel represents how ERODED that pixel is at this stage
+(0 = still intact skeleton material, 1 = fully gone) - this generator's own
+noise/threshold logic is unchanged by the 2026-08-12 mechanism redesign, only
+how BlendedTextureCache interprets the resulting alpha changed (erodeOver:
+the skeleton base's own alpha is multiplied down by this value instead of an
+opaque overlay being composited on top of it - see that method's own doc for
+the full reasoning). RGB stays DUST_HIGHLIGHT, now read as the color a pixel
+tints toward as it approaches erosion rather than the color of an overlay
+gaining coverage. Still composited directly into the skeleton texture via
+BlendedTextureCache, never rendered as its own separate transparent layer.
 
 --- 2026-08-11 retune: "reads as pale disconnected fragments, not coherent
 crumbling ash" (Noah confirmed this is the actual complaint - a visual LOOK
@@ -146,6 +152,15 @@ EXTREMITY_SHRINK = 1.0
 EXTREMITY_EARLY_BIAS = 0.20
 NOISE_BLUR_RADIUS = 2
 RANDOM_SEED = 20260729
+
+# 2026-08-12, new: matches generate_ash_base_texture.py's PILE_PATCH exactly -
+# the reserved UV swatch for PlayerCorpseRenderer's "ash_pile" ModelPart.
+# Forced to alpha=0 in every stage output below (never gets an erosion signal
+# at all), so BlendedTextureCache.erodeOver's formula always resolves to the
+# pile patch's own opaque base color there, at every stage, regardless of
+# overall ash progress - the pile texture must NOT itself erode away, since
+# it's meant to represent what's left AFTER erosion, not be subject to it.
+PILE_PATCH = (34, 3, 24, 9)
 
 # Approximate standard 64x64 Minecraft player-skin UV regions used to build
 # the extremity weight map. Format: (x0, y0, x1, y1) rectangles, exclusive of
@@ -277,6 +292,16 @@ def generate_stage(stage_index, extremity_weight, equalized_noise):
             alpha_fraction = smooth_threshold(progress, threshold[y, x], softness[y, x])
             alpha = round(alpha_fraction * 255)
             pixels[x, y] = (DUST_HIGHLIGHT[0], DUST_HIGHLIGHT[1], DUST_HIGHLIGHT[2], alpha)
+
+    # Reserved ash-pile UV patch stays alpha=0 here at every stage - see PILE_PATCH's own
+    # comment above. Overwritten AFTER the normal generation loop rather than excluded from
+    # it, so this is a hard guarantee independent of whatever the noise/threshold arrays
+    # happen to compute for those pixel coordinates.
+    px0, py0, pw, ph = PILE_PATCH
+    for y in range(py0, py0 + ph):
+        for x in range(px0, px0 + pw):
+            pixels[x, y] = (0, 0, 0, 0)
+
     return image
 
 
