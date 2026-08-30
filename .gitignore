@@ -12,3 +12,9 @@ repo/
 .project
 .settings/
 .vscode/
+.discord-release-secrets.json
+.discord-release-key.bin
+.release-state/
+/repomix-output.xml
+/session.txt
+/tools/session*.txt

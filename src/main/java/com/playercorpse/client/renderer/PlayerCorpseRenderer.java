@@ -1,7 +1,6 @@
 package com.playercorpse.client.renderer;
 
 import com.mojang.authlib.GameProfile;
-import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.logging.LogUtils;
@@ -9,15 +8,14 @@ import com.mojang.math.Axis;
 import com.playercorpse.client.PlayerCorpseSkinResolver;
 import com.playercorpse.entity.DecayPhase;
 import com.playercorpse.entity.PlayerCorpseEntity;
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.PlayerModel;
 import net.minecraft.client.model.geom.ModelLayers;
@@ -42,7 +40,6 @@ import net.minecraft.client.resources.PlayerSkin;
 import net.minecraft.client.resources.PlayerSkin.Model;
 import net.minecraft.client.resources.model.ModelManager;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.util.Mth;
 import net.minecraft.util.FastColor.ARGB32;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -80,16 +77,6 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    private static final ResourceLocation[] SHROUD_STAGE_TEXTURES = new ResourceLocation[9];
    private static final int ASH_STAGE_COUNT = 9;
    private static final ResourceLocation[] ASH_STAGE_TEXTURES = new ResourceLocation[9];
-   private final Set<Integer> loggedHeldItemIds = new HashSet<>();
-   /**
-    * TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent, remove once
-    * the ash-texture bug is actually root-caused from Noah's next in-game
-    * log. Tracks the last decay phase logged per corpse so a phase change
-    * (and in particular, whether the client ever actually observes ASH at
-    * all) shows up in logs/latest.log exactly once per transition instead of
-    * once per frame.
-    */
-   private static final Map<Integer, DecayPhase> DIAG_LAST_LOGGED_PHASE = new HashMap<>();
    private final PlayerModel<PlayerCorpseEntity> wideModel = (PlayerModel<PlayerCorpseEntity>)this.model;
    private final PlayerModel<PlayerCorpseEntity> slimModel;
    private final HumanoidModel<PlayerCorpseEntity> skeletonModel;
@@ -175,7 +162,7 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
     *
     * 2026-08-12, new: also adds "ash_pile", a small flattened box
     * representing what's left once the skeleton has essentially fully
-    * eroded/vanished (see DecayCurves.pileAppearT / applyAshDeformation
+    * eroded (see DecayCurves.pileAppearT / applyAshAppearance
     * below) - the previously-missing "small ash pile on the ground" state
     * before the grave marker spawns. Positioned at PartPose y=24: real
     * HumanoidModel.createMesh() (confirmed from the decompiled source, not
@@ -190,9 +177,9 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
     * Textured via texOffs(34,3) - a 24x9 UV footprint (2*(6+6) wide,
     * 3+6 tall, matching CubeListBuilder's standard box-UV formula) that
     * sits entirely inside the hat cube's own (32,0)-(64,16) UV rectangle
-    * but is never simultaneously in use with it: the hat is always long
-    * hidden (ASH_HIDE_HEAD_AT=0.60) before the pile starts appearing
-    * (ASH_PILE_APPEAR_START=0.80). generate_ash_base_texture.py paints a
+    * but is never simultaneously rendered by that cube: skeleton models
+    * keep the player-style hat part hidden for their entire lifetime.
+    * generate_ash_base_texture.py paints a
     * real opaque swatch there and generate_ash_texture.py deliberately
     * keeps that same patch at alpha=0 in every ash_N.png stage, so
     * erodeOver's erosion formula never touches it - the pile texture is
@@ -247,11 +234,15 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
     * Scales a part down toward (near) zero as t approaches 1, THEN flips
     * visible to false only once fully hidden - never the other order.
     * ModelPart.visible has no interpolation of its own (rendering lesson 2);
-    * toggling it at full scale is a hard, visible pop. Shared by both static
-    * models: StaticHumanoidModel's ash vanish and StaticPlayerModel's
-    * shroud-coverage hat hiding are the same problem (hide a part in sync
-    * with a continuous 0-1 driver, no boolean-only jump) on two different
-    * models.
+    * toggling it at full scale is a hard, visible pop.
+    *
+    * No longer used for StaticHumanoidModel's ASH appearance: a uniform scale-down is
+    * exactly the "shrinking" Noah's playtest flagged as wrong for material
+    * that's supposed to crumble to ash, not shrink. Still correct and still
+    * used for StaticPlayerModel's shroud-coverage hat hiding (BUILD phase) -
+    * fabric visibly covering hair is a genuinely different visual claim than
+    * bone material eroding away, and a real scale-then-hide transition is
+    * the right lever there, unaffected by this fix.
     */
    private static void setVanishing(ModelPart part, float t, boolean fullyHidden) {
       float scale = Math.max(1.0F - t, 0.001F);
@@ -264,9 +255,10 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    /**
     * Inverse of setVanishing: scales a part UP from (near) zero as t goes
     * 0->1, becoming visible as soon as it has any real presence. Used only
-    * by the ash pile (see applyAshDeformation) - unlike every other part in
-    * this file, the pile starts hidden and grows in rather than starting
-    * visible and shrinking away.
+    * by the ash pile (see applyAshAppearance) - a genuinely NEW object
+    * growing into existence, which is a different visual claim from an
+    * existing part shrinking away (2026-08-12b removed the latter for the
+    * skeleton's own parts - see setVanishing's doc).
     */
    private static void setAppearing(ModelPart part, float t) {
       float scale = Math.max(t, 0.001F);
@@ -289,18 +281,6 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          this.model = this.skeletonModel;
       } else {
          this.model = choosePlayerModel(entity, this.wideModel, this.slimModel);
-      }
-
-      if (this.loggedHeldItemIds.add(entity.getId())) {
-         LOGGER.info("[PlayerCorpse-DEBUG] corpse {} client-side getItemBySlot(MAINHAND)={}", entity.getId(), entity.getItemBySlot(EquipmentSlot.MAINHAND));
-      }
-
-      DecayPhase phase = entity.getDecayPhase();
-      if (DIAG_LAST_LOGGED_PHASE.get(entity.getId()) != phase) {
-         DIAG_LAST_LOGGED_PHASE.put(entity.getId(), phase);
-         LOGGER.info(
-            "[PlayerCorpse-DIAG-ASH] corpse {} client-side decay phase changed to {} (progress={})", entity.getId(), phase, entity.getPhaseProgress()
-         );
       }
 
       super.render(entity, entityYaw, partialTick, poseStack, bufferSource, packedLight);
@@ -357,8 +337,6 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
     * runs continuously across the whole phase instead of being concentrated
     * late.
     */
-   private static final Set<Integer> DIAG_LOGGED_ASH_TEXTURE_ENTITY_IDS = new HashSet<>();
-
    private static ResourceLocation ashTextureFor(PlayerCorpseEntity entity) {
       float effective = entity.getPhaseProgress();
       float scaled = effective * 8.0F;
@@ -368,19 +346,63 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
       ResourceLocation blended = BlendedTextureCache.getOrCreate(
          entity.getId(), "ash", ASH_STAGE_TEXTURES[stageLow], ASH_STAGE_TEXTURES[stageHigh], frac, ASH_BASE_TEXTURE
       );
-      // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent. First call
-      // per entity proves ashTextureFor() actually executes at all, and logs
-      // the exact base-texture ResourceLocation passed to BlendedTextureCache
-      // - the only way to confirm from a real log (not from re-reading the
-      // source) that this is really ash_base.png and not something else.
-      if (DIAG_LOGGED_ASH_TEXTURE_ENTITY_IDS.add(entity.getId())) {
-         LOGGER.info(
-            "[PlayerCorpse-DIAG-ASH] ashTextureFor() called for corpse {} - phase={} baseTexture={} stageLow={} stageHigh={} frac={} -> blended result={}",
-            entity.getId(), entity.getDecayPhase(), ASH_BASE_TEXTURE, ASH_STAGE_TEXTURES[stageLow], ASH_STAGE_TEXTURES[stageHigh], frac, blended
-         );
+      PlayerCorpseRenderer.maybeSpawnAshParticles(entity, stageLow, stageHigh);
+      return blended;
+   }
+
+   /**
+    * 2026-08-12c, new feature (not a bug fix): ash-motes drifting off the corpse during ASH,
+    * spawn rate driven by the SAME real per-pixel erosion data erodeOver itself consumes -
+    * BlendedTextureCache.meanErosion(stageHigh) - meanErosion(stageLow) is literally the mean of
+    * the exact two ash_N.png alpha channels ashTextureFor() is already blending between this tick,
+    * read as "how much MORE eroded, on average, the upcoming stage is than the current one" - the
+    * same bytes, not an invented separate proxy signal. Since DecayCurves' 2026-08-12b redesign made
+    * stage selection a direct linear map of raw phase progress (no remap), this delta is presently
+    * near-constant across the whole ASH phase in practice (each of the 9 stages is evenly spaced in
+    * time) - the coupling is real and would automatically track any future retune that makes stage
+    * spacing uneven again, it just doesn't have much visible variance to show under the CURRENT
+    * (deliberately linear) timeline. Flagging this honestly rather than overselling "1:1 gekoppelt"
+    * as more dramatic than it currently looks.
+    *
+    * Tick-gated (not frame-gated): render() runs once per FRAME, which is framerate-dependent and
+    * can fire many times per real game tick - entity.tickCount only advances once per real tick
+    * (server-authoritative, mirrored client-side), so gating on "have I already handled this
+    * entity's current tickCount" keeps the spawn rate framerate-independent, the same reasoning
+    * every other tick-based system in this file already follows.
+    *
+    * Client-only by construction (this whole class only runs client-side) - uses
+    * Minecraft.getInstance().level (guaranteed ClientLevel) rather than entity.level(), whose
+    * static type is the more general Level and isn't guaranteed to exposes the client particle-
+    * spawning overload without a cast this class has no other reason to need.
+    */
+   private static final Map<Integer, Integer> LAST_ASH_PARTICLE_TICK = new HashMap<>();
+   private static final float ASH_PARTICLE_COUNT_SCALE = 60.0F;
+
+   private static void maybeSpawnAshParticles(PlayerCorpseEntity entity, int stageLow, int stageHigh) {
+      Integer lastTick = LAST_ASH_PARTICLE_TICK.get(entity.getId());
+      if (lastTick != null && lastTick == entity.tickCount) {
+         return;
       }
 
-      return blended;
+      LAST_ASH_PARTICLE_TICK.put(entity.getId(), entity.tickCount);
+      float delta = BlendedTextureCache.meanErosion(ASH_STAGE_TEXTURES[stageHigh]) - BlendedTextureCache.meanErosion(ASH_STAGE_TEXTURES[stageLow]);
+      int count = Math.round(Math.max(delta, 0.0F) * ASH_PARTICLE_COUNT_SCALE);
+      if (count <= 0) {
+         return;
+      }
+
+      ClientLevel level = Minecraft.getInstance().level;
+      if (level == null) {
+         return;
+      }
+
+      AABB box = entity.getBoundingBox();
+      for (int i = 0; i < count; i++) {
+         double x = box.minX + entity.getRandom().nextDouble() * (box.maxX - box.minX);
+         double y = box.minY + entity.getRandom().nextDouble() * (box.maxY - box.minY);
+         double z = box.minZ + entity.getRandom().nextDouble() * (box.maxZ - box.minZ);
+         level.addParticle(ParticleTypes.ASH, x, y, z, 0.0, 0.02, 0.0);
+      }
    }
 
    private static PlayerSkin resolveSkin(PlayerCorpseEntity entity) {
@@ -436,11 +458,6 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
    private static final class CorpseShroudLayer extends RenderLayer<PlayerCorpseEntity, HumanoidModel<PlayerCorpseEntity>> {
       private final PlayerModel<PlayerCorpseEntity> wideModel;
       private final PlayerModel<PlayerCorpseEntity> slimModel;
-      private final Set<Integer> loggedSpawnIds = new HashSet<>();
-      private final Set<Integer> loggedTextureStatsIds = new HashSet<>();
-      private final Set<Integer> loggedBuildEndIds = new HashSet<>();
-      private final Set<Integer> loggedModelSwapIds = new HashSet<>();
-      private final Map<Integer, Integer> lastLoggedStageByEntityId = new HashMap<>();
 
       CorpseShroudLayer(
          RenderLayerParent<PlayerCorpseEntity, HumanoidModel<PlayerCorpseEntity>> parent,
@@ -467,19 +484,8 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          DecayPhase phase = entity.getDecayPhase();
          if (PlayerCorpseRenderer.isShroudCovering(entity)) {
             int entityId = entity.getId();
-            int tickCount = entity.tickCount;
-            if (this.loggedSpawnIds.add(entityId)) {
-               PlayerCorpseRenderer.LOGGER
-                  .info("[PlayerCorpse-DEBUG] corpse {} shroud first visible at client tickCount={} ({}s)", entityId, tickCount, tickCount / 20.0F);
-            }
-
             PlayerModel<PlayerCorpseEntity> playerModel = PlayerCorpseRenderer.choosePlayerModel(entity, this.wideModel, this.slimModel);
             playerModel.setupAnim(entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch);
-            if (phase.ordinal() >= DecayPhase.HOLD_FULL_SHROUD.ordinal() && this.loggedModelSwapIds.add(entityId)) {
-               PlayerCorpseRenderer.LOGGER
-                  .info("[PlayerCorpse-DEBUG] corpse {} base model swapped to skeleton at client tickCount={} ({}s)", entityId, tickCount, tickCount / 20.0F);
-            }
-
             boolean hatWasVisible = playerModel.hat.visible;
             playerModel.hat.visible = false;
 
@@ -490,17 +496,6 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
                   int stageLow = Mth.clamp((int)scaled, 0, 7);
                   int stageHigh = Mth.clamp(stageLow + 1, 0, 8);
                   float frac = Mth.clamp(scaled - stageLow, 0.0F, 1.0F);
-                  Integer lastStage = this.lastLoggedStageByEntityId.get(entityId);
-                  int loggedStage = Math.round(scaled);
-                  if (lastStage == null || lastStage != loggedStage) {
-                     PlayerCorpseRenderer.LOGGER
-                        .info(
-                           "[PlayerCorpse-DEBUG] corpse {} erosion blend {}->{} frac={} at client tickCount={} ({}s), erosion={}",
-                           new Object[]{entityId, stageLow, stageHigh, frac, tickCount, tickCount / 20.0F, erosion}
-                        );
-                     this.lastLoggedStageByEntityId.put(entityId, loggedStage);
-                  }
-
                   // Single premixed texture, single draw call - see BlendedTextureCache for why this
                   // replaces the old two-overlapping-transparent-draws crossfade approach.
                   ResourceLocation blended = BlendedTextureCache.getOrCreate(
@@ -513,95 +508,13 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
                }
 
                float alpha = phase == DecayPhase.BUILD ? DecayCurves.buildAlphaCurve(entity.getPhaseProgress()) : 1.0F;
-               if (phase.ordinal() > DecayPhase.BUILD.ordinal() && this.loggedBuildEndIds.add(entityId)) {
-                  PlayerCorpseRenderer.LOGGER
-                     .info(
-                        "[PlayerCorpse-DEBUG] corpse {} shroud fully built (build->hold) at client tickCount={} ({}s)", entityId, tickCount, tickCount / 20.0F
-                     );
-               }
-
                ResourceLocation texture = PlayerCorpseRenderer.SHROUD_STAGE_TEXTURES[0];
-               if (this.loggedTextureStatsIds.add(entityId)) {
-                  logTextureStats(entityId, texture, 0);
-               }
-
                VertexConsumer buffer = bufferSource.getBuffer(RenderType.entityTranslucent(texture));
                int color = ARGB32.color(Math.round(alpha * 255.0F), 255, 255, 255);
                playerModel.renderToBuffer(poseStack, buffer, packedLight, OverlayTexture.NO_OVERLAY, color);
             } finally {
                playerModel.hat.visible = hatWasVisible;
             }
-         }
-      }
-
-      private static void logTextureStats(int entityId, ResourceLocation texture, int stage) {
-         Resource resource;
-         try {
-            resource = Minecraft.getInstance().getResourceManager().getResourceOrThrow(texture);
-         } catch (IOException e) {
-            PlayerCorpseRenderer.LOGGER
-               .warn("[PlayerCorpse-DEBUG] corpse {} stage {} could not locate texture {}: {}", new Object[]{entityId, stage, texture, e.toString()});
-            return;
-         }
-
-         try (InputStream stream = resource.open()) {
-            NativeImage image = NativeImage.read(stream);
-
-            try {
-               long sum = 0L;
-               long sumSq = 0L;
-               int count = 0;
-               int min = 255;
-               int max = 0;
-
-               for (int y = 0; y < image.getHeight(); y++) {
-                  for (int x = 0; x < image.getWidth(); x++) {
-                     int argb = image.getPixelRGBA(x, y);
-                     int a = argb >> 24 & 0xFF;
-                     if (a != 0) {
-                        int r = argb & 0xFF;
-                        int g = argb >> 8 & 0xFF;
-                        int b = argb >> 16 & 0xFF;
-                        int lum = Math.round(0.299F * r + 0.587F * g + 0.114F * b);
-                        sum += lum;
-                        sumSq += (long)lum * lum;
-                        count++;
-                        min = Math.min(min, lum);
-                        max = Math.max(max, lum);
-                     }
-                  }
-               }
-
-               if (count != 0) {
-                  double mean = (double)sum / count;
-                  double variance = (double)sumSq / count - mean * mean;
-                  double stddev = Math.sqrt(Math.max(0.0, variance));
-                  PlayerCorpseRenderer.LOGGER
-                     .info(
-                        "[PlayerCorpse-DEBUG] corpse {} stage {} texture={} visible_px={}/{} lum_min={} lum_max={} lum_mean={} lum_stddev={}",
-                        new Object[]{
-                           entityId,
-                           stage,
-                           texture,
-                           count,
-                           image.getWidth() * image.getHeight(),
-                           min,
-                           max,
-                           String.format("%.1f", mean),
-                           String.format("%.1f", stddev)
-                        }
-                     );
-                  return;
-               }
-
-               PlayerCorpseRenderer.LOGGER
-                  .info("[PlayerCorpse-DEBUG] corpse {} stage {} texture={} has NO visible pixels", new Object[]{entityId, stage, texture});
-            } finally {
-               image.close();
-            }
-         } catch (IOException e) {
-            PlayerCorpseRenderer.LOGGER
-               .warn("[PlayerCorpse-DEBUG] corpse {} stage {} failed to read texture {} for stats: {}", new Object[]{entityId, stage, texture, e.toString()});
          }
       }
    }
@@ -644,7 +557,7 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
        * Only non-null for ashSkeletonModel (hasAshPile=true) - skeletonModel
        * is baked from vanilla's own ModelLayers.SKELETON, which has no
        * "ash_pile" child at all, and ModelPart.getChild throws (does not
-       * return null) for a missing name. resetAshState/applyAshDeformation
+       * return null) for a missing name. resetAshState/applyAshAppearance
        * both run on BOTH StaticHumanoidModel instances (setupAnim is called
        * on whichever model is currently assigned as this.model - see
        * PlayerCorpseRenderer.render()'s swap), so every use of this field
@@ -659,7 +572,9 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
       }
 
       public void setupAnim(PlayerCorpseEntity entity, float limbSwing, float limbSwingAmount, float ageInTicks, float netHeadYaw, float headPitch) {
-         super.setupAnim(entity, 0.0F, 0.0F, 0.0F, netHeadYaw, headPitch);
+         // A corpse is a static object. Passing live head yaw/pitch into the skeleton model made
+         // the skull move independently while lying down and amplified every ASH-phase seam.
+         super.setupAnim(entity, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F);
          // Every field NOT touched by the super call above (visibility, scale, this model's own
          // ash-specific y offset) must still be explicitly reset here every call, unconditionally,
          // BEFORE checking this entity's own phase. this.head/body/etc. are the SAME shared
@@ -670,16 +585,17 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          // visibly leak into a different corpse's render call.
          this.resetAshState();
          if (entity.getDecayPhase() == DecayPhase.ASH) {
-            // 2026-08-12: raw phase progress directly, no ashCollapseCurve remap - see
-            // DecayCurves' class doc for why (continuous material loss across the whole
-            // phase, not a late-concentrated collapse).
-            this.applyAshDeformation(entity.getPhaseProgress());
+            this.applyAshAppearance(entity.getPhaseProgress());
          }
       }
 
       private void resetAshState() {
          this.head.visible = true;
-         this.hat.visible = true;
+         // HumanoidModel.createMesh includes the player's outer "hat" cube. Skeletons must never
+         // render it. In the 64x64 ASH texture its UV area also stores the ash-pile swatch, so
+         // making the hat visible wrapped that swatch around the skull and visibly changed both
+         // its shape and texture at the ASH boundary.
+         this.hat.visible = false;
          this.body.visible = true;
          this.leftArm.visible = true;
          this.rightArm.visible = true;
@@ -691,7 +607,6 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          this.rightArm.xScale = this.rightArm.yScale = this.rightArm.zScale = 1.0F;
          this.leftLeg.xScale = this.leftLeg.yScale = this.leftLeg.zScale = 1.0F;
          this.rightLeg.xScale = this.rightLeg.yScale = this.rightLeg.zScale = 1.0F;
-         this.body.y = 0.0F;
          if (this.ashPile != null) {
             this.ashPile.visible = false;
             this.ashPile.xScale = this.ashPile.yScale = this.ashPile.zScale = 0.001F;
@@ -699,55 +614,12 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
       }
 
       /**
-       * All magnitudes kept within RECOVERY.md section 7's stated bounds
-       * (rotations <= 0.30 rad, translation <= 0.6 units) so this reads as
-       * structural giving-way, not wobbling. UNVERIFIED visually - this
-       * environment cannot render Minecraft; the sign/direction of every
-       * offset below (which way is "down", which way is "outward") is my
-       * best-effort reasoning about Minecraft's model-space axes, not
-       * confirmed against an actual rendered corpse.
+       * Existing bones keep exactly the vanilla skeleton pose and dimensions throughout ASH.
+       * Material loss is represented only by texture cutouts and particles; rotating or moving
+       * whole bones made the decay read as model deformation. The ash pile is a new object, so its
+       * own scale-in remains intentional.
        */
-      private void applyAshDeformation(float effective) {
-         float limbsT = DecayCurves.ashPoseT(effective, DecayCurves.ASH_HIDE_LIMBS_AT);
-         float headT = DecayCurves.ashPoseT(effective, DecayCurves.ASH_HIDE_HEAD_AT);
-         float bodyT = DecayCurves.ashPoseT(effective, DecayCurves.ASH_HIDE_BODY_AT);
-
-         // Limbs: droop down and splay outward, mirrored left/right. Both rotation axes are fine
-         // here - unlike the head, limbs are texture-less bones with no asymmetric jaw-pivoted
-         // face to reveal a corkscrew artifact (rendering lesson 3 below only applies to the head).
-         float droop = 0.30F * limbsT;
-         float splay = 0.22F * limbsT;
-         this.rightArm.xRot += droop;
-         this.rightArm.zRot += splay;
-         this.leftArm.xRot += droop;
-         this.leftArm.zRot -= splay;
-         this.rightLeg.xRot += droop;
-         this.rightLeg.zRot += splay * 0.5F;
-         this.leftLeg.xRot += droop;
-         this.leftLeg.zRot -= splay * 0.5F;
-         boolean limbsHidden = effective >= DecayCurves.ASH_HIDE_LIMBS_AT;
-         PlayerCorpseRenderer.setVanishing(this.rightArm, limbsT, limbsHidden);
-         PlayerCorpseRenderer.setVanishing(this.leftArm, limbsT, limbsHidden);
-         PlayerCorpseRenderer.setVanishing(this.rightLeg, limbsT, limbsHidden);
-         PlayerCorpseRenderer.setVanishing(this.leftLeg, limbsT, limbsHidden);
-
-         // Head: skull tilts - ONE axis only (xRot). ModelPart composes rotation Z-then-Y-then-X
-         // around its own pivot; xRot+zRot together on the head produces a corkscrew motion instead
-         // of a hinge-like sag, because its jaw-pivoted, asymmetric face texture makes that visible
-         // in a way it never is on texture-less limb bones (RECOVERY.md rendering lesson 3).
-         this.head.xRot += 0.28F * headT;
-         boolean headHidden = effective >= DecayCurves.ASH_HIDE_HEAD_AT;
-         PlayerCorpseRenderer.setVanishing(this.head, headT, headHidden);
-         this.hat.visible = this.head.visible;
-
-         // Body: sinks and caves in slightly, deforms and vanishes last of the three groups.
-         this.body.y += 0.5F * bodyT;
-         this.body.xRot += 0.15F * bodyT;
-         PlayerCorpseRenderer.setVanishing(this.body, bodyT, effective >= DecayCurves.ASH_HIDE_BODY_AT);
-
-         // 2026-08-12, new: the ash pile scales in as the body finishes vanishing, so there's an
-         // actual "small ash pile on the ground" end state instead of the model just fully
-         // disappearing with no visual bridge to the grave marker that spawns right after.
+      private void applyAshAppearance(float effective) {
          if (this.ashPile != null) {
             PlayerCorpseRenderer.setAppearing(this.ashPile, DecayCurves.pileAppearT(effective));
          }

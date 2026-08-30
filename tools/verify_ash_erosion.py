@@ -1,26 +1,33 @@
 """
 verify_ash_erosion.py
 
-Numerical verification for the 2026-08-12 ASH-phase mechanism redesign
-(continuous material erosion instead of a growing opaque overlay, plus the
-new ash_pile end state). This environment cannot render Minecraft, so this
-checks the actual pixel/curve MATH involved - the same discipline as every
-other tools/verify_*.py in this project.
+Numerical verification for the ASH-phase mechanism redesign (continuous
+material erosion instead of a growing opaque overlay, plus the ash_pile end
+state). This environment cannot render Minecraft, so this checks the actual
+pixel/curve MATH involved - the same discipline as every other
+tools/verify_*.py in this project.
 
-Covers three independent pieces:
+Checks three independent pieces:
   1. BlendedTextureCache.erodeOver's formula (Python re-implementation,
      matched byte-for-byte against the real Java source).
-  2. DecayCurves' re-tuned structural thresholds (ASH_HIDE_*) and the new
-     pileAppearT window.
-  3. Cross-check against the REAL committed ash_0..ash_8.png + ash_base.png
+  2. DecayCurves' pileAppearT window.
+  3. Cross-check against the REAL committed ash_0..ash_8.png + ash_base.png,
+     including the strict no-change ASH boundary guaranteed by stage 0
      files (if present) - reports the actual stage at which each sampled
      body region's mean erosion would cross the real GPU alpha-test discard
      threshold (0.1, confirmed from
      assets/minecraft/shaders/core/rendertype_entity_cutout_no_cull.fsh:
      `if (color.a < 0.1) discard;`), the same kind of real-pixel-data
      investigation done in the 2026-08-11c/e sessions for the old curve -
-     confirms material loss is now spread across the stage range, not
+     confirms material loss is spread across the stage range, not
      concentrated at the end.
+
+2026-08-12b: removed the RGB-tint check (formerly 1f) - erodeOver no longer
+tints color toward DUST_HIGHLIGHT at all (Noah's playtest: the tint read as
+"a layer forming over the skeleton", not material disappearing, since
+entityCutoutNoCull doesn't alpha-blend - see erodeOver's own doc). Only the
+alpha math remains; that math itself is unchanged by this edit, so checks
+1a-1e are still valid as originally written.
 
 Run from the tools/ directory, after regenerating both ash_N.png and
 ash_base.png:
@@ -33,14 +40,7 @@ from PIL import Image
 ASH_PATH = "../src/main/resources/assets/playercorpse/textures/entity/ash_{}.png"
 BASE_PATH = "../src/main/resources/assets/playercorpse/textures/entity/ash_base.png"
 
-DUST_HIGHLIGHT = (188, 184, 176)
-EDGE_TINT_FRACTION = 0.5
 DISCARD_THRESHOLD = 0.1  # real value, confirmed from the vanilla fragment shader source
-
-ASH_HIDE_LIMBS_AT = 0.35
-ASH_HIDE_HEAD_AT = 0.60
-ASH_HIDE_BODY_AT = 0.85
-ASH_POSE_RAMP_WINDOW = 0.22
 
 ASH_PILE_APPEAR_START = 0.80
 ASH_PILE_APPEAR_END = 0.95
@@ -53,26 +53,10 @@ SAMPLE_REGIONS = {"head": HEAD, "body": BODY, "right_arm": RIGHT_ARM, "right_leg
 
 
 def erode_over(erosion, base_alpha):
-    """Direct port of BlendedTextureCache.erodeOver's alpha math (RGB tint
-    doesn't affect whether a pixel survives the alpha test, so this focuses
-    on alpha; see check 1c below for the RGB tint check separately)."""
+    """Direct port of BlendedTextureCache.erodeOver's alpha math. RGB is no
+    longer tinted at all (2026-08-12b) - output color is always exactly the
+    base pixel's own color, so there is nothing left to test there."""
     return base_alpha * (1.0 - erosion)
-
-
-def erode_over_rgb(overlay_rgb, base_rgb, erosion):
-    tint = min(erosion / EDGE_TINT_FRACTION, 1.0)
-    return tuple(round(b + (o - b) * tint) for o, b in zip(overlay_rgb, base_rgb))
-
-
-def smoothstep_window(value, end, window):
-    start = end - window
-    if value <= start:
-        return 0.0
-    elif value >= end:
-        return 1.0
-    else:
-        u = (value - start) / window
-        return u * u * (3.0 - 2.0 * u)
 
 
 def pile_appear_t(raw_progress):
@@ -122,57 +106,23 @@ def main():
         assert erode_over(erosion, 0.0) == 0.0
     print("OK: base_alpha=0 regions (hat, ash_pile patch) stay fully transparent regardless of erosion")
 
-    # 1f. RGB tint reaches the overlay's own color (DUST_HIGHLIGHT) by erosion=EDGE_TINT_FRACTION,
-    #     well before the 0.9 discard point - a pixel visibly pales before it actually vanishes.
-    base_rgb = (167, 167, 167)  # real ash_base.png mean bone tone, per the 2026-08-11d session's own measurement
-    at_cap = erode_over_rgb(DUST_HIGHLIGHT, base_rgb, EDGE_TINT_FRACTION)
-    assert at_cap == DUST_HIGHLIGHT, f"expected full DUST_HIGHLIGHT tint at erosion={EDGE_TINT_FRACTION}, got {at_cap}"
-    beyond_cap = erode_over_rgb(DUST_HIGHLIGHT, base_rgb, 0.9)
-    assert beyond_cap == DUST_HIGHLIGHT, "tint must stay capped at DUST_HIGHLIGHT beyond EDGE_TINT_FRACTION, not overshoot"
-    print(f"OK: RGB tint reaches full DUST_HIGHLIGHT by erosion={EDGE_TINT_FRACTION} ({crossing - EDGE_TINT_FRACTION:.2f} of "
-          "erosion range left to visibly sit pale before that pixel is discarded)")
+    # 1f (removed 2026-08-12b): used to check the RGB tint-toward-DUST_HIGHLIGHT here. That tint
+    # is gone from erodeOver entirely now - nothing left to check; see the module docstring for why.
 
     print()
-    print("=== 2. DecayCurves structural thresholds ===")
-
-    thresholds = [("limbs", ASH_HIDE_LIMBS_AT), ("head", ASH_HIDE_HEAD_AT), ("body", ASH_HIDE_BODY_AT)]
-    for name, value in thresholds:
-        assert 0.0 < value < 1.0, f"{name} threshold {value} out of (0,1)"
-    assert ASH_HIDE_LIMBS_AT < ASH_HIDE_HEAD_AT < ASH_HIDE_BODY_AT, "thresholds must fire limbs -> head -> body, in order"
-    print(f"OK: thresholds fire in order limbs({ASH_HIDE_LIMBS_AT}) -> head({ASH_HIDE_HEAD_AT}) -> body({ASH_HIDE_BODY_AT})")
-
-    windows = [(name, value - ASH_POSE_RAMP_WINDOW, value) for name, value in thresholds]
-    for i in range(len(windows) - 1):
-        _, _, prev_end = windows[i]
-        next_name, next_start, _ = windows[i + 1]
-        gap = next_start - prev_end
-        assert -1e-9 <= gap <= 0.05, f"gap between structural windows before {next_name} is {gap:.3f}, not small/contiguous"
-        print(f"OK: window gap before '{next_name}' ramp start is {gap:.3f} (small/contiguous, no dead pause)")
-
-    for name, hide_at in thresholds:
-        window = ASH_POSE_RAMP_WINDOW
-        assert smoothstep_window(hide_at - window, hide_at, window) == 0.0
-        assert smoothstep_window(hide_at, hide_at, window) == 1.0
-        mid = smoothstep_window(hide_at - window / 2, hide_at, window)
-        assert 0.0 < mid < 1.0
-    print("OK: each structural ramp is bounded [0,1] and reaches exactly 1.0 at its own hideAt")
-
-    print()
-    print("=== 3. ash_pile appear window ===")
+    print("=== 2. ash_pile appear window ===")
     assert pile_appear_t(ASH_PILE_APPEAR_START) == 0.0
     assert pile_appear_t(ASH_PILE_APPEAR_END) == 1.0
     assert pile_appear_t(1.0) == 1.0
     mid = pile_appear_t((ASH_PILE_APPEAR_START + ASH_PILE_APPEAR_END) / 2.0)
     assert abs(mid - 0.5) < 1e-6, f"smoothstep midpoint should be ~0.5, got {mid}"
-    overlap = ASH_HIDE_BODY_AT - ASH_PILE_APPEAR_START
-    print(f"OK: pile ramps 0->1 over [{ASH_PILE_APPEAR_START}, {ASH_PILE_APPEAR_END}], "
-          f"starting {overlap:.2f} before body's own hideAt ({ASH_HIDE_BODY_AT}) - crossfade, not a gap")
+    print(f"OK: pile ramps 0->1 over [{ASH_PILE_APPEAR_START}, {ASH_PILE_APPEAR_END}]")
     tail = 1.0 - ASH_PILE_APPEAR_END
-    print(f"OK: pile is fully formed with {tail:.2f} of the phase ({tail * 90:.1f}s of a 90s default ASH_TICKS) "
+    print(f"OK: pile is fully formed with {tail:.2f} of the phase ({tail * 120:.1f}s of a 120s default ASH_TICKS) "
           "remaining before completeAshAndDiscard()")
 
     print()
-    print("=== 4. cross-check against real committed textures (if present) ===")
+    print("=== 3. cross-check against real committed textures (if present) ===")
     try:
         base_img = np.array(Image.open(BASE_PATH).convert("RGBA"))
     except FileNotFoundError:
@@ -186,6 +136,10 @@ def main():
     except FileNotFoundError:
         print(f"SKIPPED: ash_N.png stages not found - run generate_ash_texture.py first")
         return
+
+    stage_zero_alpha = stage_imgs[0][:, :, 3]
+    assert np.max(stage_zero_alpha) == 0, "ash_0.png must be fully transparent so the skull cannot pop at the ASH boundary"
+    print("OK: ash_0.png is fully transparent; ASH starts from the unchanged skeleton texture")
 
     base_alpha = base_img[:, :, 3].astype(np.float64) / 255.0
 
@@ -207,7 +161,7 @@ def main():
                   "(individual pixels may still, since thresholds are per-pixel, not per-region-mean)")
 
     print()
-    print("Confirms the erosion signal is genuinely spread across stages 0-8 for each region (continuous")
+    print("Confirms the erosion signal is genuinely spread across stages 1-8 for each region (continuous")
     print("crossing points, not all clustered near stage 8) - still unverified: the actual RENDERED look.")
 
 

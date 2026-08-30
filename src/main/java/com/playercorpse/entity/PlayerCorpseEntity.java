@@ -1,6 +1,7 @@
 package com.playercorpse.entity;
 
 import com.mojang.logging.LogUtils;
+import com.playercorpse.CorpsePlacement;
 import com.playercorpse.PlayerCorpseConfig;
 import com.playercorpse.PlayerCorpseCorpseTracker;
 import com.playercorpse.menu.PlayerCorpseMenu;
@@ -38,6 +39,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
@@ -75,10 +77,26 @@ public class PlayerCorpseEntity extends LivingEntity {
    private final SimpleContainer inventory = new SimpleContainer(36);
    private final SimpleContainer equipment = new SimpleContainer(EQUIPMENT_SIZE);
    private DecayPhase phase = DecayPhase.HOLD_FRESH;
-   private long phaseTicks;
+   /**
+    * 2026-08-12c: changed from long to double to support fractional per-tick increments (see
+    * environmentalDecayRate() below) - a corpse decaying at e.g. 0.6x speed in a cold biome needs
+    * genuine fractional accumulation, not just a scaled integer duration, since the environment can
+    * change mid-phase (a corpse dragged out of water, or into a different biome, doesn't happen in
+    * this mod, but the rate itself can still change tick-to-tick as game state changes around a
+    * stationary corpse - e.g. a cold snap, or someone filling in the water it was sitting in).
+    * COMPATIBILITY NOTE, flagged honestly: NBT persistence below changed from putLong/getLong to
+    * putDouble/getDouble under the SAME "PhaseTicks" key. CompoundTag#getDouble returns 0.0 if the
+    * stored tag is actually a LongTag (different NBT tag type, same key) - any corpse saved by a
+    * pre-2026-08-12c build and loaded by this one will have its phaseTicks silently reset to 0 (back
+    * to the start of its current phase, NOT a different phase - DecayPhase itself is a separate,
+    * unaffected string field). Not a data-destroying change (no items lost) but a real, visible
+    * behavior change for any corpse that already exists in a save from before this update.
+    */
+   private double phaseTicks;
    private long ageInTicks;
    private long emptyTicks;
    private boolean openedByAnyone;
+   private boolean placementValidated;
    private final int[] generalOriginalSlot = new int[36];
    private double anchorX;
    private double anchorY;
@@ -182,7 +200,7 @@ public class PlayerCorpseEntity extends LivingEntity {
    private void setPhase(DecayPhase newPhase) {
       this.entityData.set(DATA_DECAY_PHASE, (byte)newPhase.ordinal());
       this.phase = newPhase;
-      this.phaseTicks = 0L;
+      this.phaseTicks = 0.0;
       this.entityData.set(DATA_PHASE_PROGRESS, 0.0F);
    }
 
@@ -241,6 +259,28 @@ public class PlayerCorpseEntity extends LivingEntity {
 
    public void tick() {
       super.tick();
+      if (!this.placementValidated && this.level() instanceof ServerLevel serverLevel) {
+         this.placementValidated = true;
+         Vec3 previousPosition = this.position();
+         if (!CorpsePlacement.isSafe(serverLevel, this)) {
+            Optional<Vec3> safePosition = CorpsePlacement.findSafePosition(serverLevel, this, previousPosition);
+            if (safePosition.isPresent()) {
+               Vec3 relocatedPosition = safePosition.get();
+               this.setPos(relocatedPosition.x, relocatedPosition.y, relocatedPosition.z);
+               LOGGER.warn(
+                  "[PlayerCorpse] Relocated loaded corpse {} from unsafe position {} to {}",
+                  this.getId(), previousPosition, relocatedPosition
+               );
+            } else {
+               LOGGER.error("[PlayerCorpse] Could not relocate corpse {} from unsafe position {}", this.getId(), previousPosition);
+            }
+         }
+
+         // anchorSet was historically not persisted. Re-anchor after the
+         // one-time validation so old saved corpses remain fixed too.
+         this.anchorHere();
+      }
+
       if (!this.getDeltaMovement().equals(Vec3.ZERO)) {
          this.setDeltaMovement(Vec3.ZERO);
       }
@@ -251,12 +291,22 @@ public class PlayerCorpseEntity extends LivingEntity {
             this.anchorY = minY;
          }
 
-         if (this.getX() != this.anchorX || this.getY() != this.anchorY || this.getZ() != this.anchorZ) {
+         // 2026-08-17, epsilon instead of exact equality (flagged by a pasted-in code review,
+         // verified against this exact code before applying): setDeltaMovement(ZERO) a few lines up
+         // stops the corpse from accelerating, but vanilla physics (gravity integration, block
+         // collision resolution) still nudges getX/Y/Z by sub-ulp floating-point amounts most
+         // ticks even at rest. The old exact != comparison caught that drift and called
+         // super.setPos() essentially every tick, each call rebuilding the bounding box and
+         // touching the chunk's entity slice for no visible effect - the corpse never actually
+         // looks like it moved either way. 1.0E-4 blocks (~0.1mm) is far below anything visible or
+         // physically meaningful here, so this only suppresses no-op churn, not real correction.
+         if (this.distanceToSqr(this.anchorX, this.anchorY, this.anchorZ) > 1.0E-4) {
             super.setPos(this.anchorX, this.anchorY, this.anchorZ);
          }
       }
 
       if (!this.level().isClientSide()) {
+         PlayerCorpseConfig.migrateDecayDefaults();
          this.syncEquipmentDisplay();
          this.ageInTicks++;
          if (this.isInventoryEmpty()) {
@@ -287,9 +337,9 @@ public class PlayerCorpseEntity extends LivingEntity {
    }
 
    private void tickDecayPhase() {
-      this.phaseTicks++;
+      this.phaseTicks += this.environmentalDecayRate();
       long duration = durationTicksFor(this.phase);
-      float progress = Mth.clamp((float)this.phaseTicks / (float)duration, 0.0F, 1.0F);
+      float progress = Mth.clamp((float)(this.phaseTicks / (double)duration), 0.0F, 1.0F);
       if (progress != this.getPhaseProgress()) {
          this.entityData.set(DATA_PHASE_PROGRESS, progress);
       }
@@ -304,23 +354,56 @@ public class PlayerCorpseEntity extends LivingEntity {
    }
 
    /**
+    * 2026-08-12c, new feature (not part of the original RECOVERY.md spec, added at Noah's explicit
+    * request): how many "phase ticks" this real tick is worth, before duration comparison. 1.0 = the
+    * old, unconditional behavior (one real tick = one phase tick). Water speeds decay up
+    * (bacterial/erosive action in water is the real-world intuition, not a cited source - a game-
+    * design choice); cold biomes slow it down (the same "cold preserves" intuition every game with a
+    * decay mechanic leans on). Both apply independently and combine multiplicatively if both are
+    * true at once (e.g. icy water) - see PlayerCorpseConfig.WATER_DECAY_SPEED_MULTIPLIER's own doc
+    * for why that's a judgment call, not a verified spec.
+    *
+    * isInWater() is a long-standing, stable Entity method - low risk. The cold check
+    * (Biome#getTemperature(BlockPos) < 0.15, the same threshold vanilla uses for snow-vs-rain)
+    * could NOT be verified against the real decompiled 1.21.1 source in this environment (no
+    * Minecraft assets/javap access here at all, unlike every API this project has used up to this
+    * point, which was always checked against the real client jar before use) - flagged explicitly,
+    * please confirm this actually compiles before trusting it, same discipline this project has
+    * always applied, just without the tool access to do it myself this time.
+    */
+   private double environmentalDecayRate() {
+      double rate = 1.0;
+      if (this.isInWater()) {
+         rate *= (Double)PlayerCorpseConfig.WATER_DECAY_SPEED_MULTIPLIER.get();
+      }
+
+      if (this.level() instanceof ServerLevel serverLevel) {
+         Biome biome = serverLevel.getBiome(this.blockPosition()).value();
+         if (biome.coldEnoughToSnow(this.blockPosition())) {
+            rate *= (Double)PlayerCorpseConfig.COLD_DECAY_SPEED_MULTIPLIER.get();
+         }
+      }
+
+      return rate;
+   }
+
+   /**
     * Ash phase complete: spawn a grave marker transferring both containers
     * if anything remains (RECOVERY.md section 7 - "nur wenn noch Loot drin
     * ist"), then discard. If the corpse is already empty, nothing is
     * spawned and discard() below simply removes it - remove()'s own
     * ground-drop fallback is a no-op too, since there's nothing left in
     * either container.
-    */
+    *
+    * 2026-08-12c: RECOVERY.md's original "only if loot remains" rule is now overridable via
+    * PlayerCorpseConfig.ALWAYS_SPAWN_GRAVE_MARKER (default false, so the original behavior above is
+    * completely unchanged unless a server operator opts in) - when enabled, a marker spawns
+    * regardless, as a pure memorial. transferFrom() below is unaffected either way: called with
+    * empty containers, it just transfers nothing, same method, no special-casing needed.
+   */
    private void completeAshAndDiscard() {
-      // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent, remove once
-      // BUG 4 (floating grave marker) is actually root-caused from Noah's next
-      // log. Proves this method runs at all, independent of whether a marker
-      // ends up spawned.
-      LOGGER.info(
-         "[PlayerCorpse-DIAG-GRAVE] completeAshAndDiscard() reached for corpse {} - inventoryEmpty={} corpse.getY()={} blockPosition()={}",
-         this.getId(), this.isInventoryEmpty(), this.getY(), this.blockPosition()
-      );
-      if (!this.isInventoryEmpty() && this.level() instanceof ServerLevel serverLevel) {
+      boolean shouldSpawnMarker = !this.isInventoryEmpty() || (Boolean)PlayerCorpseConfig.ALWAYS_SPAWN_GRAVE_MARKER.get();
+      if (shouldSpawnMarker && this.level() instanceof ServerLevel serverLevel) {
          double groundY = findGroundY(serverLevel, this.blockPosition());
          PlayerGraveMarkerEntity marker = new PlayerGraveMarkerEntity(PlayerCorpseEntities.GRAVE_MARKER.get(), serverLevel);
          marker.setPos(this.getX(), groundY, this.getZ());
@@ -355,17 +438,6 @@ public class PlayerCorpseEntity extends LivingEntity {
          marker.setYBodyRot(0.0F);
          marker.transferFrom(this.inventory, this.equipment, this.generalOriginalSlot);
          serverLevel.addFreshEntity(marker);
-         // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent. Logs all
-         // three Y values from BUG 4's fix chain in one line: the corpse's own
-         // Y (the old, discredited source), what findGroundY() actually
-         // computed, and the marker's real Y after setPos() + addFreshEntity()
-         // - so a mismatch between "findGroundY() returned" and "marker ended
-         // up at" (e.g. something repositioning it afterward) is visible
-         // directly in the log instead of only inferred from re-reading code.
-         LOGGER.info(
-            "[PlayerCorpse-DIAG-GRAVE] marker {} spawned for corpse {} - corpse.getY()={} findGroundY()={} marker.getY() after spawn={}",
-            marker.getId(), this.getId(), this.getY(), groundY, marker.getY()
-         );
       }
 
       this.discard();
@@ -435,9 +507,10 @@ public class PlayerCorpseEntity extends LivingEntity {
       if (!this.level().isClientSide() && player instanceof ServerPlayer serverPlayer) {
          if (!this.openedByAnyone) {
             this.openedByAnyone = true;
-            if (this.level() instanceof ServerLevel serverLevel) {
-               PlayerCorpseCorpseTracker.onCorpseOpened(serverLevel, this);
-            }
+         }
+
+         if (this.level() instanceof ServerLevel serverLevel) {
+            PlayerCorpseCorpseTracker.onCorpseOpened(serverLevel, this);
          }
 
          Component title = (Component)(this.getCustomName() != null ? this.getCustomName() : Component.literal("Corpse"));
@@ -533,7 +606,9 @@ public class PlayerCorpseEntity extends LivingEntity {
       compound.putString("OwnerName", this.getOwnerName());
       this.getOwnerUuid().ifPresent(uuid -> compound.putUUID("OwnerUUID", uuid));
       compound.putString("DecayPhase", this.phase.name());
-      compound.putLong("PhaseTicks", this.phaseTicks);
+      // 2026-08-12c: putLong -> putDouble (phaseTicks is now fractional - see that field's own
+      // doc for the load-compatibility consequence for pre-existing saved corpses).
+      compound.putDouble("PhaseTicks", this.phaseTicks);
       compound.putBoolean("OpenedByAnyone", this.openedByAnyone);
       compound.putLong("AgeInTicks", this.ageInTicks);
       compound.putLong("EmptyTicks", this.emptyTicks);
@@ -566,9 +641,11 @@ public class PlayerCorpseEntity extends LivingEntity {
 
       this.phase = savedPhase;
       this.entityData.set(DATA_DECAY_PHASE, (byte)savedPhase.ordinal());
-      this.phaseTicks = compound.getLong("PhaseTicks");
+      // 2026-08-12c: getLong -> getDouble (see phaseTicks' own doc - resets to 0 for corpses saved
+      // by a pre-2026-08-12c build, since CompoundTag#getDouble returns 0.0 against a stored LongTag).
+      this.phaseTicks = compound.getDouble("PhaseTicks");
       long durationForSavedPhase = durationTicksFor(savedPhase);
-      this.entityData.set(DATA_PHASE_PROGRESS, Mth.clamp((float)this.phaseTicks / (float)durationForSavedPhase, 0.0F, 1.0F));
+      this.entityData.set(DATA_PHASE_PROGRESS, Mth.clamp((float)(this.phaseTicks / (double)durationForSavedPhase), 0.0F, 1.0F));
       this.openedByAnyone = compound.getBoolean("OpenedByAnyone");
       this.ageInTicks = compound.getLong("AgeInTicks");
       this.emptyTicks = compound.getLong("EmptyTicks");

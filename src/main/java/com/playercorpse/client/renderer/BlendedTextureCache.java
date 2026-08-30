@@ -62,8 +62,50 @@ import org.slf4j.Logger;
 public final class BlendedTextureCache {
    private static final Logger LOGGER = LogUtils.getLogger();
    private static final Map<String, CacheEntry> CACHE = new HashMap<>();
+   private static final Map<ResourceLocation, Float> MEAN_EROSION_CACHE = new HashMap<>();
 
    private BlendedTextureCache() {
+   }
+
+   /**
+    * 2026-08-12c, new: mean alpha (= mean EROSION, per generate_ash_texture.py's own documented
+    * meaning of that channel - see erodeOver's doc) across an entire ash_N.png stage texture,
+    * loaded once and cached forever per ResourceLocation (these are static game assets, identical
+    * for every corpse - unlike CACHE above, which is keyed per (entity, slot) because its inputs
+    * genuinely vary per corpse).
+    *
+    * Exists so PlayerCorpseRenderer's ash-particle spawn rate (RECOVERY.md follow-up feature, not
+    * in the original spec) can be driven by the SAME real per-pixel erosion data erodeOver itself
+    * consumes, instead of an invented proxy signal - literally reads the alpha channel of the exact
+    * two stage textures ashTextureFor() is already about to blend between, the same bytes erodeOver
+    * turns into real holes. Whole-canvas mean (not restricted to the 5 UV regions the skeleton mesh
+    * actually samples) is a deliberate simplification: the hat region and the ash_pile UV patch are
+    * forced to alpha=0 in EVERY stage (generate_ash_texture.py's own PILE_PATCH override, and the
+    * hat was never given real ash data either) - a caller that only ever wants the DELTA between two
+    * stages (as this feature does) gets an unbiased result regardless, since a region that's
+    * identically 0 in both stages contributes 0 to the difference either way. A caller wanting an
+    * absolute per-stage value (not just a delta) would need the region-restricted version instead -
+    * not needed for this feature, so not built.
+    */
+   public static float meanErosion(ResourceLocation stageTexture) {
+      Float cached = MEAN_EROSION_CACHE.get(stageTexture);
+      if (cached != null) {
+         return cached;
+      }
+
+      NativeImage image = loadImage(stageTexture);
+      long sum = 0L;
+      int width = image.getWidth();
+      int height = image.getHeight();
+      for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+            sum += image.getPixelRGBA(x, y) >> 24 & 0xFF;
+         }
+      }
+
+      float mean = width > 0 && height > 0 ? sum / 255.0F / (width * height) : 0.0F;
+      MEAN_EROSION_CACHE.put(stageTexture, mean);
+      return mean;
    }
 
    public static ResourceLocation getOrCreate(
@@ -190,24 +232,35 @@ public final class BlendedTextureCache {
     * this reads as continuous, staggered crumbling rather than a single
     * instant or a uniform fade.
     *
-    * Color still tints toward the overlay's own RGB (DUST_HIGHLIGHT) as
-    * erosion rises, capped at EDGE_TINT_FRACTION so a pixel reaches full
-    * dust color well before it actually vanishes at ~0.9 - keeps RECOVERY.md
-    * section 7 point 2's "pale colour at the decay edge" intent, just as a
-    * property of material about to be lost rather than of an overlay
-    * gaining coverage.
+    * 2026-08-12b - REMOVED the RGB tint-toward-DUST_HIGHLIGHT this method
+    * used to apply as erosion rose (previously capped at EDGE_TINT_FRACTION).
+    * Root cause of Noah's actual playtest report ("a layer forms over the
+    * skeleton, the real skin doesn't disappear"): entityCutoutNoCull is
+    * ALPHA-TESTED, not alpha-blended (see the discard-threshold paragraph
+    * above) - every alpha value from 1.0 down to just above 0.1 renders
+    * IDENTICALLY, fully opaque, no partial transparency at all. So for the
+    * ~90% of a pixel's erosion journey before it actually crosses the
+    * discard threshold, the ONLY visible change was the tint - the pixel
+    * stayed fully solid and just changed color toward pale dust. That reads
+    * exactly as "a coating forming on top", not "material disappearing",
+    * because nothing was actually becoming transparent at any point before
+    * the instant discard. There is no way to sell a gradual fade under this
+    * render type - only genuine per-pixel appear/disappear. Tint removed
+    * entirely: a pixel now stays its real base color (bone/skeleton tone)
+    * unchanged until the moment its own erosion crosses 0.9, at which point
+    * it's simply gone - real holes in real material, nothing painted on.
+    * This drops RECOVERY.md section 7 point 2's "pale colour at the decay
+    * edge" intent - that effect needs actual alpha blending to read
+    * correctly, which this single-draw-call/no-separate-RenderLayer design
+    * (deliberately kept, see class doc) cannot provide. Noah's own report
+    * takes priority over that original spec detail: real disappearing over
+    * a color gradient that turned out to look like the opposite of decay.
     *
-    * Where base alpha is already 0 (the hat region, and the new dedicated
-    * ash-pile UV patch reserved inside it - see generate_ash_base_texture.py)
-    * outAlpha stays 0 regardless of erosion - unaffected by this change,
-    * same as the old formula's behavior there post-BUG-3.
+    * Where base alpha is already 0 (the hat region, and the ash-pile UV
+    * patch reserved inside it) outAlpha stays 0 regardless of erosion -
+    * unchanged by this edit, same as before.
     */
-   private static final float EDGE_TINT_FRACTION = 0.5F;
-
    private static int erodeOver(int overlay, int base) {
-      int or = overlay & 0xFF;
-      int og = overlay >> 8 & 0xFF;
-      int ob = overlay >> 16 & 0xFF;
       int oa = overlay >> 24 & 0xFF;
       int br = base & 0xFF;
       int bg = base >> 8 & 0xFF;
@@ -216,11 +269,7 @@ public final class BlendedTextureCache {
       float erosion = oa / 255.0F;
       float baseAlpha = ba / 255.0F;
       float outAlpha = baseAlpha * (1.0F - erosion);
-      float tint = Math.min(erosion / EDGE_TINT_FRACTION, 1.0F);
-      int r = Math.round(br + (or - br) * tint);
-      int g = Math.round(bg + (og - bg) * tint);
-      int b = Math.round(bb + (ob - bb) * tint);
-      return pack(r, g, b, Math.round(outAlpha * 255.0F));
+      return pack(br, bg, bb, Math.round(outAlpha * 255.0F));
    }
 
    private static int pack(int r, int g, int b, int a) {
@@ -232,17 +281,10 @@ public final class BlendedTextureCache {
          Resource resource = Minecraft.getInstance().getResourceManager().getResourceOrThrow(location);
 
          try (InputStream stream = resource.open()) {
-            NativeImage image = NativeImage.read(stream);
-            // TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent. Proves
-            // a real image with real pixel data loaded, as opposed to silently
-            // falling into the catch block below and returning a blank 1x1
-            // fallback (which would look exactly like "the fix didn't take" in
-            // game while the source code looks correct).
-            LOGGER.info("[PlayerCorpse-DIAG-TEXLOAD] loaded {} successfully: {}x{}", location, image.getWidth(), image.getHeight());
-            return image;
+            return NativeImage.read(stream);
          }
       } catch (IOException e) {
-         LOGGER.warn("[PlayerCorpse-DIAG-TEXLOAD] FAILED to load {} - falling back to blank 1x1 image: {}", location, e.toString());
+         LOGGER.warn("[PlayerCorpse] Failed to load texture {}; using a transparent fallback: {}", location, e.toString());
          return new NativeImage(1, 1, true);
       }
    }

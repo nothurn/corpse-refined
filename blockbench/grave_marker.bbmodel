@@ -1,0 +1,72 @@
+{
+  "meta": {
+    "format_version": "4.5",
+    "model_format": "free",
+    "box_uv": false
+  },
+  "name": "grave_marker",
+  "model_identifier": "",
+  "visible_box": [1, 1, 0],
+  "variable_placeholders": "",
+  "resolution": {
+    "width": 16,
+    "height": 16
+  },
+  "elements": [
+    {
+      "name": "post",
+      "from": [-1, 0, -1],
+      "to": [1, 20, 1],
+      "autouv": 0,
+      "color": 5,
+      "origin": [0, 0, 0],
+      "uv_offset": [0, 0],
+      "faces": {
+        "north": {"uv": [2, 2, 4, 22], "texture": null},
+        "east": {"uv": [0, 2, 2, 22], "texture": null},
+        "south": {"uv": [6, 2, 8, 22], "texture": null},
+        "west": {"uv": [4, 2, 6, 22], "texture": null},
+        "up": {"uv": [2, 0, 4, 2], "texture": null},
+        "down": {"uv": [4, 0, 6, 2], "texture": null}
+      },
+      "type": "cube",
+      "uuid": "27d7a370-8c06-4111-b2a5-1acbe0a61c6c"
+    },
+    {
+      "name": "crossbar",
+      "from": [-5, 13, -1],
+      "to": [5, 15, 1],
+      "autouv": 0,
+      "color": 5,
+      "origin": [0, 0, 0],
+      "uv_offset": [0, 22],
+      "faces": {
+        "north": {"uv": [1, 24, 11, 26], "texture": null},
+        "east": {"uv": [0, 24, 1, 26], "texture": null},
+        "south": {"uv": [12, 24, 22, 26], "texture": null},
+        "west": {"uv": [11, 24, 12, 26], "texture": null},
+        "up": {"uv": [1, 22, 11, 24], "texture": null},
+        "down": {"uv": [11, 22, 21, 24], "texture": null}
+      },
+      "type": "cube",
+      "uuid": "5e6f6e8a-7087-4335-b7b8-94b786f4e435"
+    }
+  ],
+  "outliner": [
+    {
+      "name": "grave_marker_root",
+      "origin": [0, 0, 0],
+      "color": 0,
+      "uuid": "601b3ae2-8e93-44f4-bb51-0b0a4cb22780",
+      "export": true,
+      "isOpen": true,
+      "locked": false,
+      "visibility": true,
+      "children": [
+        "27d7a370-8c06-4111-b2a5-1acbe0a61c6c",
+        "5e6f6e8a-7087-4335-b7b8-94b786f4e435"
+      ]
+    }
+  ],
+  "textures": []
+}

@@ -188,3 +188,40 @@ idea {
         downloadJavadoc = true
     }
 }
+
+// Discord publishing is deliberately an explicit release task. A normal build never posts anything.
+tasks.register('configureDiscordRelease', Exec) {
+    group = 'publishing'
+    description = 'Stores the two Discord webhook URLs encrypted for the current Windows user.'
+    standardInput = System.in
+    workingDir projectDir
+    commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            file('tools/Configure-DiscordRelease.ps1').absolutePath,
+            '-ProjectDirectory', projectDir.absolutePath
+}
+
+tasks.register('validateDiscordRelease', Exec) {
+    group = 'verification'
+    description = 'Builds and previews the Discord release without contacting Discord.'
+    dependsOn tasks.named('build')
+    workingDir projectDir
+    commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            file('tools/Publish-DiscordRelease.ps1').absolutePath,
+            '-ProjectDirectory', projectDir.absolutePath,
+            '-DryRun'
+}
+
+// If clean and build are both in the graph, make their intended order explicit.
+tasks.named('build').configure {
+    mustRunAfter tasks.named('clean')
+}
+
+tasks.register('publishDiscordRelease', Exec) {
+    group = 'publishing'
+    description = 'Clean-builds the JAR and publishes it plus the current changelog to Discord.'
+    dependsOn tasks.named('clean'), tasks.named('build')
+    workingDir projectDir
+    commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            file('tools/Publish-DiscordRelease.ps1').absolutePath,
+            '-ProjectDirectory', projectDir.absolutePath
+}

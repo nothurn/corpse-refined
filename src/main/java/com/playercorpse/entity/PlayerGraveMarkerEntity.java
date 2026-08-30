@@ -1,6 +1,7 @@
 package com.playercorpse.entity;
 
 import com.mojang.logging.LogUtils;
+import com.playercorpse.CorpsePlacement;
 import com.playercorpse.menu.PlayerCorpseMenu;
 import com.playercorpse.registry.PlayerCorpseMenus;
 import java.util.Arrays;
@@ -9,6 +10,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.syncher.SynchedEntityData.Builder;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.SimpleContainer;
@@ -25,6 +27,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 
 /**
@@ -43,7 +46,7 @@ public class PlayerGraveMarkerEntity extends LivingEntity {
    private final SimpleContainer inventory = new SimpleContainer(PlayerCorpseEntity.CONTAINER_SIZE);
    private final SimpleContainer equipment = new SimpleContainer(PlayerCorpseEntity.EQUIPMENT_SIZE);
    private final int[] generalOriginalSlot = new int[PlayerCorpseEntity.CONTAINER_SIZE];
-   private boolean diagLoggedFirstTick;
+   private boolean placementValidated;
 
    public PlayerGraveMarkerEntity(EntityType<? extends PlayerGraveMarkerEntity> type, Level level) {
       super(type, level);
@@ -53,27 +56,24 @@ public class PlayerGraveMarkerEntity extends LivingEntity {
       this.blocksBuilding = false;
    }
 
-   /**
-    * TEMPORARY DIAGNOSTIC LOGGING (2026-08-11) - NOT permanent, remove once
-    * BUG 4 (floating grave marker) is actually root-caused from Noah's next
-    * log. Fires exactly once per marker per server session, whether the
-    * marker was just spawned by completeAshAndDiscard() this tick or was
-    * loaded from NBT from a previous session. Cross-reference the entity id
-    * here against the "[PlayerCorpse-DIAG-GRAVE] marker N spawned" line: if
-    * this id was never logged as freshly spawned, this marker predates the
-    * current fix and its position is whatever old, possibly-still-wrong Y
-    * was written to disk before BUG 4 was patched - reloading it proves
-    * nothing about whether findGroundY() itself works.
-    */
    public void tick() {
       super.tick();
-      if (!this.diagLoggedFirstTick && this.level() instanceof net.minecraft.server.level.ServerLevel) {
-         this.diagLoggedFirstTick = true;
-         LOGGER.info(
-            "[PlayerCorpse-DIAG-GRAVE] marker {} first server tick this session - pos=({}, {}, {})",
-            this.getId(), this.getX(), this.getY(), this.getZ()
-         );
+      if (!this.placementValidated && this.level() instanceof ServerLevel serverLevel) {
+         this.placementValidated = true;
+         Vec3 previousPosition = this.position();
+         if (!CorpsePlacement.isSafeAndSupported(serverLevel, this)) {
+            CorpsePlacement.findSafePosition(serverLevel, this, previousPosition).ifPresentOrElse(relocatedPosition -> {
+               this.setPos(relocatedPosition.x, relocatedPosition.y, relocatedPosition.z);
+               LOGGER.warn(
+                  "[PlayerCorpse] Relocated loaded grave marker {} from unsafe position {} to {}",
+                  this.getId(), previousPosition, relocatedPosition
+               );
+            }, () -> LOGGER.error(
+               "[PlayerCorpse] Could not relocate grave marker {} from unsafe position {}", this.getId(), previousPosition
+            ));
+         }
       }
+
    }
 
    /**

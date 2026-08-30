@@ -11,7 +11,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.BlockPos.MutableBlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
@@ -20,13 +19,13 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDropsEvent;
 import org.slf4j.Logger;
 
 public final class PlayerCorpseEvents {
-   private static final int MAX_UPWARD_SEARCH = 16;
    private static final Logger LOGGER = LogUtils.getLogger();
    private static final double LYING_BODY_HALF_LENGTH = 0.9;
    private static final Map<UUID, Map<ItemStack, Integer>> PENDING_ORIGINAL_SLOTS = new HashMap<>();
@@ -70,22 +69,37 @@ public final class PlayerCorpseEvents {
 
             if (!drops.isEmpty()) {
                ServerLevel level = player.serverLevel();
-               BlockPos spawnPos = findSafeCorpsePos(level, player.blockPosition());
+               BlockPos deathPos = player.blockPosition();
                float yaw = player.getYRot();
                float yawRadians = yaw * (float) (Math.PI / 180.0);
                double forwardX = -Mth.sin(yawRadians);
                double forwardZ = Mth.cos(yawRadians);
-               double anchorX = spawnPos.getX() + 0.5 - forwardX * 0.9;
-               double anchorZ = spawnPos.getZ() + 0.5 - forwardZ * 0.9;
+               Vec3 preferredPosition = new Vec3(
+                  deathPos.getX() + 0.5 - forwardX * LYING_BODY_HALF_LENGTH,
+                  deathPos.getY(),
+                  deathPos.getZ() + 0.5 - forwardZ * LYING_BODY_HALF_LENGTH
+               );
                PlayerCorpseEntity corpse = new PlayerCorpseEntity((EntityType<? extends PlayerCorpseEntity>)PlayerCorpseEntities.PLAYER_CORPSE.get(), level);
-               corpse.setPos(anchorX, spawnPos.getY(), anchorZ);
-               corpse.anchorHere();
                corpse.setYRot(yaw);
                corpse.setYHeadRot(yaw);
                corpse.setYBodyRot(yaw);
+               Vec3 spawnPosition = CorpsePlacement.findSafePosition(level, corpse, preferredPosition).orElse(preferredPosition);
+               corpse.setPos(spawnPosition.x, spawnPosition.y, spawnPosition.z);
+               corpse.anchorHere();
+               if (spawnPosition.distanceToSqr(preferredPosition) > 1.0E-6) {
+                  LOGGER.warn(
+                     "[PlayerCorpse] Moved corpse {} from unsafe death placement {} to safe position {}",
+                     corpse.getId(), preferredPosition, spawnPosition
+                  );
+               } else if (!CorpsePlacement.isSafe(level, corpse)) {
+                  LOGGER.error(
+                     "[PlayerCorpse] No dry collision-free placement found near {} for corpse {}; using the death position as a last resort",
+                     preferredPosition, corpse.getId()
+                  );
+               }
+
                corpse.setOwner(player.getUUID(), player.getGameProfile().getName());
                corpse.setDeathCauseCategory(DeathCauseCategory.fromDamageSource(event.getSource()));
-               LOGGER.info("[PlayerCorpse-DEBUG] corpse {} heldItemAtDeath={}", corpse.getId(), heldItemAtDeath);
                if (heldItemAtDeath != null && !heldItemAtDeath.isEmpty()) {
                   corpse.setHeldItemForRender(heldItemAtDeath);
                }
@@ -109,7 +123,7 @@ public final class PlayerCorpseEvents {
                      }
 
                      if (targetSlot >= 36) {
-                        ItemEntity overflow = new ItemEntity(level, anchorX, spawnPos.getY() + 0.5, anchorZ, stack);
+                        ItemEntity overflow = new ItemEntity(level, spawnPosition.x, spawnPosition.y + 0.5, spawnPosition.z, stack);
                         level.addFreshEntity(overflow);
                      } else {
                         corpse.getInventory().setItem(targetSlot, stack);
@@ -134,28 +148,11 @@ public final class PlayerCorpseEvents {
                level.addFreshEntity(corpse);
                PlayerCorpseCorpseTracker.setActiveCorpse(player, level, corpse);
                String deathCause = event.getSource().getLocalizedDeathMessage(player).getString();
-               PlayerCorpseDeathHistory.record(level, player, spawnPos, corpse, deathCause);
+               PlayerCorpseDeathHistory.record(level, player, corpse, deathCause);
                event.getDrops().clear();
             }
          }
       }
    }
 
-   private static BlockPos findSafeCorpsePos(ServerLevel level, BlockPos deathPos) {
-      MutableBlockPos pos = deathPos.mutable();
-
-      for (int i = 0; i < 16; i++) {
-         if (!isSolid(level, pos)) {
-            return pos.immutable();
-         }
-
-         pos.move(0, 1, 0);
-      }
-
-      return deathPos;
-   }
-
-   private static boolean isSolid(ServerLevel level, BlockPos pos) {
-      return !level.getBlockState(pos).getCollisionShape(level, pos).isEmpty();
-   }
 }
