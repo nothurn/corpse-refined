@@ -30,12 +30,16 @@ public class PlayerCorpseDeathHistoryScreen extends Screen {
    private int index;
    private Button previousButton;
    private Button nextButton;
+   private boolean graveMarkersEnabled;
+   private boolean canManageGraveMarkers;
    private int previewEntryIndex = -1;
    private PlayerCorpseDeathHistoryScreen.HistorySkinPlayer previewEntity;
 
-   public PlayerCorpseDeathHistoryScreen(List<DeathHistoryEntry> entries) {
+   public PlayerCorpseDeathHistoryScreen(List<DeathHistoryEntry> entries, boolean graveMarkersEnabled, boolean canManageGraveMarkers) {
       super(Component.literal("Death History"));
       this.entries = entries;
+      this.graveMarkersEnabled = graveMarkersEnabled;
+      this.canManageGraveMarkers = canManageGraveMarkers;
    }
 
    protected void init() {
@@ -54,13 +58,21 @@ public class PlayerCorpseDeathHistoryScreen extends Screen {
          this.index++;
          this.updateButtons();
       }).bounds(centerX + 40, buttonY, 70, 20).build());
-      this.addRenderableWidget(Button.builder(Component.literal("Close"), button -> this.onClose()).bounds(centerX - 50, buttonY + 26, 100, 20).build());
+      this.addRenderableWidget(Button.builder(Component.literal("Settings..."), button -> Minecraft.getInstance().setScreen(
+         new PlayerCorpseSettingsScreen(this, this.graveMarkersEnabled, this.canManageGraveMarkers)
+      )).bounds(centerX - 105, buttonY + 26, 100, 20).build());
+      this.addRenderableWidget(Button.builder(Component.literal("Close"), button -> this.onClose()).bounds(centerX + 5, buttonY + 26, 100, 20).build());
       this.updateButtons();
    }
 
    private void updateButtons() {
       this.previousButton.active = this.index > 0;
       this.nextButton.active = this.index < this.entries.size() - 1;
+   }
+
+   public void updateGraveSettings(boolean enabled, boolean canManage) {
+      this.graveMarkersEnabled = enabled;
+      this.canManageGraveMarkers = canManage;
    }
 
    public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {

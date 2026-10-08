@@ -1,5 +1,6 @@
 {
   "entity.playercorpse.player_corpse": "Player Corpse",
+  "block.playercorpse.grave_marker": "Grave Marker",
   "key.categories.playercorpse": "Player Corpse",
   "key.playercorpse.open_death_history": "Open Death History"
 }

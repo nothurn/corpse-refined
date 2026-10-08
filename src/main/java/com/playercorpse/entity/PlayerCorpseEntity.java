@@ -4,8 +4,10 @@ import com.mojang.logging.LogUtils;
 import com.playercorpse.CorpsePlacement;
 import com.playercorpse.PlayerCorpseConfig;
 import com.playercorpse.PlayerCorpseCorpseTracker;
+import com.playercorpse.block.entity.GraveMarkerBlockEntity;
 import com.playercorpse.menu.PlayerCorpseMenu;
 import com.playercorpse.registry.PlayerCorpseEntities;
+import com.playercorpse.registry.PlayerCorpseBlocks;
 import com.playercorpse.registry.PlayerCorpseMenus;
 import java.util.Arrays;
 import java.util.List;
@@ -308,11 +310,15 @@ public class PlayerCorpseEntity extends LivingEntity {
       if (!this.level().isClientSide()) {
          PlayerCorpseConfig.migrateDecayDefaults();
          this.syncEquipmentDisplay();
+         this.syncHeldItemDisplay();
          this.ageInTicks++;
          if (this.isInventoryEmpty()) {
             this.emptyTicks++;
-            if (this.emptyTicks >= (Long)PlayerCorpseConfig.EMPTY_DECAY_TICKS.get() && this.phase.ordinal() < DecayPhase.HOLD_FULL_SKELETON.ordinal()) {
-               this.setPhase(DecayPhase.HOLD_FULL_SKELETON);
+            if (this.emptyTicks >= (Long)PlayerCorpseConfig.EMPTY_DECAY_TICKS.get() && this.phase == DecayPhase.HOLD_FRESH) {
+               // Empty corpses may begin decaying sooner, but must still traverse BUILD,
+               // HOLD_FULL_SHROUD and EROSION. Jumping directly to the skeleton phase made
+               // the player model change into a skeleton in one frame.
+               this.setPhase(DecayPhase.BUILD);
             }
          } else {
             this.emptyTicks = 0L;
@@ -402,42 +408,18 @@ public class PlayerCorpseEntity extends LivingEntity {
     * empty containers, it just transfers nothing, same method, no special-casing needed.
    */
    private void completeAshAndDiscard() {
-      boolean shouldSpawnMarker = !this.isInventoryEmpty() || (Boolean)PlayerCorpseConfig.ALWAYS_SPAWN_GRAVE_MARKER.get();
+      boolean shouldSpawnMarker = (Boolean)PlayerCorpseConfig.GRAVE_MARKERS_ENABLED.get()
+         && (!this.isInventoryEmpty() || (Boolean)PlayerCorpseConfig.ALWAYS_SPAWN_GRAVE_MARKER.get());
       if (shouldSpawnMarker && this.level() instanceof ServerLevel serverLevel) {
          double groundY = findGroundY(serverLevel, this.blockPosition());
-         PlayerGraveMarkerEntity marker = new PlayerGraveMarkerEntity(PlayerCorpseEntities.GRAVE_MARKER.get(), serverLevel);
-         marker.setPos(this.getX(), groundY, this.getZ());
-         /*
-          * Orientation fix (2026-08-11): previously inherited this.getYRot() - the
-          * corpse's own yaw, which is just whatever direction the player happened to
-          * be facing at the moment of death. That has no relationship to how the
-          * cross should face a later viewer, and GraveMarkerRenderer.createBodyLayer's
-          * crossbar only extends along the model's own local X axis (a thin 2-unit
-          * Z depth, same as the post) - a random yaw reads as a proper cross from
-          * some approach angles and edge-on/near-invisible from others, roughly at
-          * random. PLUS - confirmed by reading LivingEntityRenderer#render (ground
-          * truth decompiled source): it reads entity.yBodyRot directly as a field,
-          * NOT getYRot() - and LivingEntity only syncs yBodyRot from yRot for moving
-          * entities (the position-delta path in LivingEntity#tick), which a static,
-          * noPhysics marker never triggers. The old setYRot()-only call therefore
-          * never actually affected the rendered angle at all; every marker rendered
-          * at yBodyRot's Java default of 0.0F regardless. Compare
-          * PlayerCorpseEvents' corpse spawn, which correctly sets all three
-          * (setYRot/setYHeadRot/setYBodyRot) - the marker spawn here was missing
-          * the two that matter for LivingEntityRenderer.
-          *
-          * Fix: stop inheriting the corpse's arbitrary yaw and use a fixed,
-          * deliberate default (0.0F - the model's own unrotated/identity
-          * orientation, i.e. exactly what PartPose.ZERO already implies was
-          * intended) via setYBodyRot(), the field the renderer actually reads.
-          * Every marker now faces the same predictable direction instead of a
-          * death-facing angle that had no bearing on readability.
-          */
-         marker.setYRot(0.0F);
-         marker.setYHeadRot(0.0F);
-         marker.setYBodyRot(0.0F);
-         marker.transferFrom(this.inventory, this.equipment, this.generalOriginalSlot);
-         serverLevel.addFreshEntity(marker);
+         BlockPos gravePos = BlockPos.containing(this.getX(), groundY, this.getZ());
+         if (serverLevel.getBlockState(gravePos).canBeReplaced()
+            && serverLevel.setBlock(gravePos, PlayerCorpseBlocks.GRAVE_MARKER.get().defaultBlockState(), 3)
+            && serverLevel.getBlockEntity(gravePos) instanceof GraveMarkerBlockEntity grave) {
+            grave.transferFrom(this.inventory, this.equipment, this.generalOriginalSlot);
+         } else {
+            LOGGER.error("[PlayerCorpse] Could not place persistent grave block at {}; dropping its remaining contents", gravePos);
+         }
       }
 
       this.discard();
@@ -576,6 +558,37 @@ public class PlayerCorpseEntity extends LivingEntity {
             this.entityData.set(accessor, current.copy());
          }
       }
+   }
+
+   /**
+    * The held item is captured separately at death so the renderer can keep
+    * the exact death pose. It must not outlive the corresponding loot stack:
+    * container mutations happen through the menu/network handlers and do not
+    * call setItemSlot on this synthetic LivingEntity.
+    */
+   private void syncHeldItemDisplay() {
+      ItemStack displayed = this.getHeldItemForRender();
+      if (!displayed.isEmpty() && !this.containsItemType(displayed)) {
+         this.entityData.set(DATA_HELD_ITEM, ItemStack.EMPTY);
+      }
+   }
+
+   private boolean containsItemType(ItemStack displayed) {
+      for (int i = 0; i < this.inventory.getContainerSize(); i++) {
+         ItemStack stack = this.inventory.getItem(i);
+         if (!stack.isEmpty() && stack.getItem() == displayed.getItem()) {
+            return true;
+         }
+      }
+
+      for (int i = 0; i < this.equipment.getContainerSize(); i++) {
+         ItemStack stack = this.equipment.getItem(i);
+         if (!stack.isEmpty() && stack.getItem() == displayed.getItem()) {
+            return true;
+         }
+      }
+
+      return false;
    }
 
    public void setItemSlot(EquipmentSlot slot, ItemStack stack) {

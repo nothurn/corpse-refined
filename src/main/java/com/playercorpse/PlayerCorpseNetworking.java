@@ -19,22 +19,17 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
-import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.fml.common.EventBusSubscriber.Bus;
 import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
-@EventBusSubscriber(modid = "playercorpse", bus = Bus.MOD)
 public final class PlayerCorpseNetworking {
    private PlayerCorpseNetworking() {
    }
 
-   @SubscribeEvent
    public static void onRegisterPayloadHandlers(RegisterPayloadHandlersEvent event) {
-      PayloadRegistrar registrar = event.registrar("1");
+      PayloadRegistrar registrar = event.registrar("2");
       registrar.playToServer(
          PlayerCorpseNetworking.TransferItemsPayload.TYPE,
          PlayerCorpseNetworking.TransferItemsPayload.STREAM_CODEC,
@@ -55,13 +50,52 @@ public final class PlayerCorpseNetworking {
          PlayerCorpseNetworking.CorpseTrackerSyncPayload.STREAM_CODEC,
          (payload, context) -> PlayerCorpseHudArrow.handleCorpseTrackerSync(payload)
       );
+      registrar.playToServer(
+         PlayerCorpseNetworking.SetGraveMarkersEnabledPayload.TYPE,
+         PlayerCorpseNetworking.SetGraveMarkersEnabledPayload.STREAM_CODEC,
+         PlayerCorpseNetworking::handleSetGraveMarkersEnabled
+      );
+      registrar.playToClient(
+         PlayerCorpseNetworking.GraveSettingsSyncPayload.TYPE,
+         PlayerCorpseNetworking.GraveSettingsSyncPayload.STREAM_CODEC,
+         (payload, context) -> PlayerCorpseClientEvents.handleGraveSettingsSync(payload)
+      );
    }
 
    private static void handleRequestDeathHistory(PlayerCorpseNetworking.RequestDeathHistoryPayload payload, IPayloadContext context) {
       if (context.player() instanceof ServerPlayer serverPlayer) {
          List var4 = PlayerCorpseDeathHistoryData.get(serverPlayer.serverLevel()).getEntries(serverPlayer.getUUID());
-         PacketDistributor.sendToPlayer(serverPlayer, new PlayerCorpseNetworking.DeathHistorySyncPayload(var4), new CustomPacketPayload[0]);
+         PacketDistributor.sendToPlayer(
+            serverPlayer,
+            new PlayerCorpseNetworking.DeathHistorySyncPayload(
+               var4, (Boolean)PlayerCorpseConfig.GRAVE_MARKERS_ENABLED.get(), canManageGraveMarkers(serverPlayer)
+            ),
+            new CustomPacketPayload[0]
+         );
       }
+   }
+
+   private static void handleSetGraveMarkersEnabled(
+      PlayerCorpseNetworking.SetGraveMarkersEnabledPayload payload, IPayloadContext context
+   ) {
+      if (context.player() instanceof ServerPlayer serverPlayer) {
+         if (canManageGraveMarkers(serverPlayer)) {
+            PlayerCorpseConfig.GRAVE_MARKERS_ENABLED.set(payload.enabled());
+            PlayerCorpseConfig.SPEC.save();
+         }
+
+         PacketDistributor.sendToPlayer(
+            serverPlayer,
+            new PlayerCorpseNetworking.GraveSettingsSyncPayload(
+               (Boolean)PlayerCorpseConfig.GRAVE_MARKERS_ENABLED.get(), canManageGraveMarkers(serverPlayer)
+            ),
+            new CustomPacketPayload[0]
+         );
+      }
+   }
+
+   private static boolean canManageGraveMarkers(ServerPlayer player) {
+      return player.hasPermissions(2);
    }
 
    private static void handleTransferItems(PlayerCorpseNetworking.TransferItemsPayload payload, IPayloadContext context) {
@@ -160,13 +194,19 @@ public final class PlayerCorpseNetworking {
       }
    }
 
-   public record DeathHistorySyncPayload(List<DeathHistoryEntry> entries) implements CustomPacketPayload {
+   public record DeathHistorySyncPayload(
+      List<DeathHistoryEntry> entries, boolean graveMarkersEnabled, boolean canManageGraveMarkers
+   ) implements CustomPacketPayload {
       public static final Type<PlayerCorpseNetworking.DeathHistorySyncPayload> TYPE = new Type(
          ResourceLocation.fromNamespaceAndPath("playercorpse", "death_history_sync")
       );
       public static final StreamCodec<RegistryFriendlyByteBuf, PlayerCorpseNetworking.DeathHistorySyncPayload> STREAM_CODEC = StreamCodec.composite(
          ByteBufCodecs.collection(ArrayList::new, DeathHistoryEntry.STREAM_CODEC),
          PlayerCorpseNetworking.DeathHistorySyncPayload::entries,
+         ByteBufCodecs.BOOL,
+         PlayerCorpseNetworking.DeathHistorySyncPayload::graveMarkersEnabled,
+         ByteBufCodecs.BOOL,
+         PlayerCorpseNetworking.DeathHistorySyncPayload::canManageGraveMarkers,
          PlayerCorpseNetworking.DeathHistorySyncPayload::new
       );
 
@@ -197,6 +237,38 @@ public final class PlayerCorpseNetworking {
       );
 
       public Type<PlayerCorpseNetworking.TransferItemsPayload> type() {
+         return TYPE;
+      }
+   }
+
+   public record SetGraveMarkersEnabledPayload(boolean enabled) implements CustomPacketPayload {
+      public static final Type<PlayerCorpseNetworking.SetGraveMarkersEnabledPayload> TYPE = new Type(
+         ResourceLocation.fromNamespaceAndPath("playercorpse", "set_grave_markers_enabled")
+      );
+      public static final StreamCodec<RegistryFriendlyByteBuf, PlayerCorpseNetworking.SetGraveMarkersEnabledPayload> STREAM_CODEC = StreamCodec.composite(
+         ByteBufCodecs.BOOL,
+         PlayerCorpseNetworking.SetGraveMarkersEnabledPayload::enabled,
+         PlayerCorpseNetworking.SetGraveMarkersEnabledPayload::new
+      );
+
+      public Type<PlayerCorpseNetworking.SetGraveMarkersEnabledPayload> type() {
+         return TYPE;
+      }
+   }
+
+   public record GraveSettingsSyncPayload(boolean enabled, boolean canManage) implements CustomPacketPayload {
+      public static final Type<PlayerCorpseNetworking.GraveSettingsSyncPayload> TYPE = new Type(
+         ResourceLocation.fromNamespaceAndPath("playercorpse", "grave_settings_sync")
+      );
+      public static final StreamCodec<RegistryFriendlyByteBuf, PlayerCorpseNetworking.GraveSettingsSyncPayload> STREAM_CODEC = StreamCodec.composite(
+         ByteBufCodecs.BOOL,
+         PlayerCorpseNetworking.GraveSettingsSyncPayload::enabled,
+         ByteBufCodecs.BOOL,
+         PlayerCorpseNetworking.GraveSettingsSyncPayload::canManage,
+         PlayerCorpseNetworking.GraveSettingsSyncPayload::new
+      );
+
+      public Type<PlayerCorpseNetworking.GraveSettingsSyncPayload> type() {
          return TYPE;
       }
    }

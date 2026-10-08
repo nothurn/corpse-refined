@@ -42,8 +42,9 @@ BASE_PATH = "../src/main/resources/assets/playercorpse/textures/entity/ash_base.
 
 DISCARD_THRESHOLD = 0.1  # real value, confirmed from the vanilla fragment shader source
 
-ASH_PILE_APPEAR_START = 0.80
-ASH_PILE_APPEAR_END = 0.95
+ASH_PILE_APPEAR_START = 0.72
+ASH_PILE_APPEAR_END = 0.86
+ASH_BONE_CLEANUP_AT = ASH_PILE_APPEAR_END
 
 HEAD = (0, 0, 32, 16)
 BODY = (16, 16, 24, 16)
@@ -67,6 +68,10 @@ def pile_appear_t(raw_progress):
     else:
         u = (raw_progress - ASH_PILE_APPEAR_START) / (ASH_PILE_APPEAR_END - ASH_PILE_APPEAR_START)
         return u * u * (3.0 - 2.0 * u)
+
+
+def show_ash_bones(raw_progress):
+    return raw_progress < ASH_BONE_CLEANUP_AT
 
 
 def main():
@@ -117,8 +122,12 @@ def main():
     mid = pile_appear_t((ASH_PILE_APPEAR_START + ASH_PILE_APPEAR_END) / 2.0)
     assert abs(mid - 0.5) < 1e-6, f"smoothstep midpoint should be ~0.5, got {mid}"
     print(f"OK: pile ramps 0->1 over [{ASH_PILE_APPEAR_START}, {ASH_PILE_APPEAR_END}]")
+    assert show_ash_bones(ASH_BONE_CLEANUP_AT - 0.001)
+    assert not show_ash_bones(ASH_BONE_CLEANUP_AT)
+    assert not show_ash_bones(1.0)
+    print("OK: all bone model parts are hidden once the grounded pile finishes forming")
     tail = 1.0 - ASH_PILE_APPEAR_END
-    print(f"OK: pile is fully formed with {tail:.2f} of the phase ({tail * 120:.1f}s of a 120s default ASH_TICKS) "
+    print(f"OK: pile is fully formed with {tail:.2f} of the phase ({tail * 120:.1f}s of a 120s ASH example) "
           "remaining before completeAshAndDiscard()")
 
     print()
@@ -139,6 +148,9 @@ def main():
 
     stage_zero_alpha = stage_imgs[0][:, :, 3]
     assert np.max(stage_zero_alpha) == 0, "ash_0.png must be fully transparent so the skull cannot pop at the ASH boundary"
+    stage_eight_alpha = stage_imgs[8][:, :, 3]
+    for name, (x0, y0, w, h) in SAMPLE_REGIONS.items():
+        assert np.min(stage_eight_alpha[y0 : y0 + h, x0 : x0 + w]) == 255, f"{name} must be fully eroded in ash_8.png"
     print("OK: ash_0.png is fully transparent; ASH starts from the unchanged skeleton texture")
 
     base_alpha = base_img[:, :, 3].astype(np.float64) / 255.0

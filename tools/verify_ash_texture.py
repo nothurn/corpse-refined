@@ -1,6 +1,8 @@
 import numpy as np
 from PIL import Image
 
+PILE_PATCH = (34, 3, 24, 9)
+
 BASE = "../src/main/resources/assets/playercorpse/textures/entity/ash_{}.png"
 TORSO_CORE = (24, 24, 26, 26)
 HEAD_TOP = (8, 0, 16, 8)
@@ -16,7 +18,12 @@ for i in range(9):
     overall = alpha.mean()
     if i == 0:
         assert np.max(alpha) == 0.0, "stage 0 must not alter the skeleton at the ASH boundary"
-    elif i <= 4:
+    if i == 8:
+        outside_pile = alpha.copy()
+        px, py, pw, ph = PILE_PATCH
+        outside_pile[py:py + ph, px:px + pw] = 1.0
+        assert np.min(outside_pile) == 1.0, "stage 8 must fully remove every bone pixel"
+    if 0 < i <= 4:
         assert head_mean > torso_mean, f"stage {i}: skull crown should begin eroding ahead of the torso core"
     assert overall >= previous_overall, f"stage {i}: erosion must be monotonic"
     previous_overall = overall

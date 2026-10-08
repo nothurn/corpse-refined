@@ -15,7 +15,6 @@ import java.util.UUID;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.particles.ParticleTypes;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.PlayerModel;
 import net.minecraft.client.model.geom.ModelLayers;
@@ -396,12 +395,18 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          return;
       }
 
-      AABB box = entity.getBoundingBox();
+      float yaw = entity.getYRot() * Mth.DEG_TO_RAD;
+      double forwardX = -Mth.sin(yaw);
+      double forwardZ = Mth.cos(yaw);
+      double rightX = forwardZ;
+      double rightZ = -forwardX;
       for (int i = 0; i < count; i++) {
-         double x = box.minX + entity.getRandom().nextDouble() * (box.maxX - box.minX);
-         double y = box.minY + entity.getRandom().nextDouble() * (box.maxY - box.minY);
-         double z = box.minZ + entity.getRandom().nextDouble() * (box.maxZ - box.minZ);
-         level.addParticle(ParticleTypes.ASH, x, y, z, 0.0, 0.02, 0.0);
+         double alongBody = (entity.getRandom().nextDouble() - 0.5) * 1.85;
+         double acrossBody = (entity.getRandom().nextDouble() - 0.5) * 0.55;
+         double x = entity.getX() + forwardX * alongBody + rightX * acrossBody;
+         double y = entity.getY() + 0.08 + entity.getRandom().nextDouble() * 0.32;
+         double z = entity.getZ() + forwardZ * alongBody + rightZ * acrossBody;
+         level.addParticle(ParticleTypes.ASH, x, y, z, 0.0, 0.008, 0.0);
       }
    }
 
@@ -623,6 +628,14 @@ public class PlayerCorpseRenderer extends LivingEntityRenderer<PlayerCorpseEntit
          if (this.ashPile != null) {
             PlayerCorpseRenderer.setAppearing(this.ashPile, DecayCurves.pileAppearT(effective));
          }
+
+         boolean showBones = DecayCurves.showAshBones(effective);
+         this.head.visible = showBones;
+         this.body.visible = showBones;
+         this.leftArm.visible = showBones;
+         this.rightArm.visible = showBones;
+         this.leftLeg.visible = showBones;
+         this.rightLeg.visible = showBones;
       }
    }
 

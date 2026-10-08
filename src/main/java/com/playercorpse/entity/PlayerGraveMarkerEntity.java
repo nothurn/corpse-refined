@@ -2,10 +2,13 @@ package com.playercorpse.entity;
 
 import com.mojang.logging.LogUtils;
 import com.playercorpse.CorpsePlacement;
+import com.playercorpse.block.entity.GraveMarkerBlockEntity;
 import com.playercorpse.menu.PlayerCorpseMenu;
 import com.playercorpse.registry.PlayerCorpseMenus;
+import com.playercorpse.registry.PlayerCorpseBlocks;
 import java.util.Arrays;
 import java.util.List;
+import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.syncher.SynchedEntityData.Builder;
@@ -25,16 +28,16 @@ import net.minecraft.world.entity.Entity.RemovalReason;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.MenuType;
+import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 
 /**
- * Left behind when a PlayerCorpseEntity finishes the ASH phase still holding
- * loot (RECOVERY.md section 7). Extends LivingEntity, same as the corpse
- * itself, so it never runs despawn checks and persists for free without a
- * SavedData/BlockEntity of its own - no gravity, invulnerable, anchored.
+ * Compatibility loader for graves saved by builds that represented the grave
+ * as an entity. On its first server tick it transfers the two inventories into
+ * the real grave block and removes itself. New corpses never create this type.
  * Reuses PlayerCorpseMenu/its screen/networking completely unchanged (see
  * that class - it only ever takes plain Container instances plus
  * PlayerCorpseEntity's static equipmentSlotAt/equipmentContainerIndex
@@ -43,6 +46,7 @@ import org.slf4j.Logger;
  */
 public class PlayerGraveMarkerEntity extends LivingEntity {
    private static final Logger LOGGER = LogUtils.getLogger();
+   public static final float MAX_DURABILITY = 4.0F;
    private final SimpleContainer inventory = new SimpleContainer(PlayerCorpseEntity.CONTAINER_SIZE);
    private final SimpleContainer equipment = new SimpleContainer(PlayerCorpseEntity.EQUIPMENT_SIZE);
    private final int[] generalOriginalSlot = new int[PlayerCorpseEntity.CONTAINER_SIZE];
@@ -54,6 +58,7 @@ public class PlayerGraveMarkerEntity extends LivingEntity {
       this.setNoGravity(true);
       this.noPhysics = true;
       this.blocksBuilding = false;
+      this.setHealth(MAX_DURABILITY);
    }
 
    public void tick() {
@@ -71,6 +76,14 @@ public class PlayerGraveMarkerEntity extends LivingEntity {
             }, () -> LOGGER.error(
                "[PlayerCorpse] Could not relocate grave marker {} from unsafe position {}", this.getId(), previousPosition
             ));
+         }
+
+         BlockPos gravePos = this.blockPosition();
+         if (serverLevel.getBlockState(gravePos).canBeReplaced()
+            && serverLevel.setBlock(gravePos, PlayerCorpseBlocks.GRAVE_MARKER.get().defaultBlockState(), 3)
+            && serverLevel.getBlockEntity(gravePos) instanceof GraveMarkerBlockEntity grave) {
+            grave.transferFrom(this.inventory, this.equipment, this.generalOriginalSlot);
+            this.discard();
          }
       }
 
@@ -112,7 +125,29 @@ public class PlayerGraveMarkerEntity extends LivingEntity {
    }
 
    public boolean isInvulnerableTo(DamageSource damageSource) {
-      return true;
+      return !(damageSource.getDirectEntity() instanceof Player);
+   }
+
+   /**
+    * The marker is an entity because it owns the corpse containers, so it
+    * cannot use block hardness directly. Four fixed hand hits approximate a
+    * wooden plank; any axe breaks it in one hit. Other damage sources remain
+    * ignored so fire, mobs and explosions cannot destroy protected loot.
+    */
+   public boolean hurt(DamageSource damageSource, float amount) {
+      if (!(damageSource.getDirectEntity() instanceof Player player)) {
+         return false;
+      }
+
+      float breakDamage = player.getMainHandItem().getItem() instanceof AxeItem ? MAX_DURABILITY : 1.0F;
+      boolean damaged = super.hurt(damageSource, breakDamage);
+      if (damaged && !this.isAlive() && !this.level().isClientSide()) {
+         // discard() reaches remove(), whose existing container fallback
+         // drops and clears every stored stack exactly once.
+         this.discard();
+      }
+
+      return damaged;
    }
 
    public boolean isPickable() {
@@ -159,7 +194,7 @@ public class PlayerGraveMarkerEntity extends LivingEntity {
       for (int i = 0; i < container.getContainerSize(); i++) {
          ItemStack stack = container.getItem(i);
          if (!stack.isEmpty()) {
-            this.level().addFreshEntity(new ItemEntity(this.level(), this.getX(), this.getY(), this.getZ(), stack));
+            this.level().addFreshEntity(new ItemEntity(this.level(), this.getX(), this.getY() + 0.25, this.getZ(), stack));
          }
       }
 

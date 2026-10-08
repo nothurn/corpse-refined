@@ -294,7 +294,14 @@ def generate_stage(stage_index, extremity_weight, equalized_noise):
             # made that tail large enough to remove head pixels on the very first ASH frame.
             # Keeping stage 0 strictly transparent guarantees an identical boundary; stage 1 is
             # still approached continuously through BlendedTextureCache's per-tick interpolation.
-            alpha_fraction = 0.0 if stage_index == 0 else smooth_threshold(progress, threshold[y, x], softness[y, x])
+            if stage_index == 0:
+                alpha_fraction = 0.0
+            elif stage_index == STAGE_COUNT - 1:
+                # The last stage must contain no surviving bone pixels. The pile patch is
+                # restored to alpha=0 below, so the rendered end state is the grounded pile only.
+                alpha_fraction = 1.0
+            else:
+                alpha_fraction = smooth_threshold(progress, threshold[y, x], softness[y, x])
             alpha = round(alpha_fraction * 255)
             pixels[x, y] = (DUST_HIGHLIGHT[0], DUST_HIGHLIGHT[1], DUST_HIGHLIGHT[2], alpha)
 

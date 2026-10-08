@@ -9,8 +9,9 @@ import net.minecraft.util.Mth;
  */
 final class DecayCurves {
    private static final float BUILD_EASE_FRACTION = 0.12F;
-   private static final float ASH_PILE_APPEAR_START = 0.80F;
-   private static final float ASH_PILE_APPEAR_END = 0.95F;
+   private static final float ASH_PILE_APPEAR_START = 0.72F;
+   private static final float ASH_PILE_APPEAR_END = 0.86F;
+   private static final float ASH_BONE_CLEANUP_AT = ASH_PILE_APPEAR_END;
 
    private DecayCurves() {
    }
@@ -28,6 +29,10 @@ final class DecayCurves {
          float u = (rawProgress - ASH_PILE_APPEAR_START) / (ASH_PILE_APPEAR_END - ASH_PILE_APPEAR_START);
          return u * u * (3.0F - 2.0F * u);
       }
+   }
+
+   static boolean showAshBones(float rawProgress) {
+      return rawProgress < ASH_BONE_CLEANUP_AT;
    }
 
    /**

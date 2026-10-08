@@ -65,7 +65,7 @@ public final class PlayerCorpseConfig {
    public static final LongValue ASH_TICKS = BUILDER.comment(
          new String[]{
             "Ticks for the bare skeleton to crumble to ash and the corpse to be removed. If any",
-            "items remain at that point, a PlayerGraveMarkerEntity is left behind holding them -",
+            "items remain at that point, a persistent grave marker block is left behind holding them -",
             "see RECOVERY.md section 7. Material is lost continuously across the whole phase",
             "(erosion-based texture alpha, same mechanism EROSION uses), not held stable then",
             "suddenly collapsed. Default of 2400 is 2 real-world minutes.",
@@ -78,13 +78,11 @@ public final class PlayerCorpseConfig {
    public static final LongValue EMPTY_DECAY_TICKS = BUILDER.comment(
          new String[]{
             "Ticks a corpse waits, once BOTH its equipment and general inventory are completely",
-            "empty, before it fast-forwards straight to the HOLD_FULL_SKELETON phase (skipping the",
-            "early cosmetic HOLD_FRESH/BUILD/HOLD_FULL_SHROUD/EROSION phases, since there's no loot",
-            "left to protect by lingering in them). From there it decays and despawns exactly like",
-            "any other corpse - since it's empty, no grave marker is left behind when it finally",
-            "reaches ash, UNLESS always_spawn_grave_marker below is enabled, in which case an empty",
-            "memorial marker spawns anyway. Never counts down while any item remains. Default of 1200",
-            "is 1 real-world minute."
+            "empty, before it starts the visible BUILD phase early. It still traverses the complete",
+            "shroud build and erosion sequence so the player model never changes into a skeleton in",
+            "one frame. By default an empty corpse leaves NO grave block once it reaches ash, unless",
+            "always_spawn_grave_marker below is enabled. Never counts down while any item remains.",
+            "The default of 1200 is 1 real-world minute."
          }
       )
       .defineInRange("empty_decay_ticks", 1200L, 1L, Long.MAX_VALUE);
@@ -93,7 +91,7 @@ public final class PlayerCorpseConfig {
             "Safety net only, OFF by default: if enabled, a corpse still holding items after",
             "force_despawn_ticks have passed since it spawned is removed anyway (its items are",
             "dropped on the ground, never deleted - see PlayerCorpseEntity#remove). Unlike reaching",
-            "ash naturally, this does NOT spawn a grave marker - it's a last-resort ceiling for",
+            "ash naturally, this does NOT spawn a grave block - it's a last-resort ceiling for",
             "servers that want a hard cap on abandoned corpses, not part of the normal decay story.",
             "Intended only for servers that want a hard ceiling on how long an abandoned corpse can",
             "persist."
@@ -154,15 +152,23 @@ public final class PlayerCorpseConfig {
          }
       )
       .defineInRange("cold_decay_speed_multiplier", 0.6, 0.05, 1.0);
+   public static final BooleanValue GRAVE_MARKERS_ENABLED = BUILDER.comment(
+         new String[]{
+            "Master switch for grave markers. If false, no new grave block is created after the",
+            "ash phase. Any remaining corpse contents are dropped at the corpse's verified position",
+            "instead of being deleted. Existing graves are never removed by this setting and remain",
+            "until a player breaks them. Server operators can change this from Death History > Settings."
+         }
+      )
+      .define("grave_markers_enabled", true);
    public static final BooleanValue ALWAYS_SPAWN_GRAVE_MARKER = BUILDER.comment(
          new String[]{
-            "If true, a PlayerGraveMarkerEntity is always left behind once a corpse reaches ash, even",
+            "If true, a grave marker block is always left behind once a corpse reaches ash, even",
             "if its inventory is completely empty (a plain memorial cross, holding nothing) - RECOVERY.md",
             "section 7's original spec only ever called for one when loot remained, and that is still",
-            "this setting's default (false). NOTE: an empty corpse fast-forwards straight to",
-            "HOLD_FULL_SKELETON via empty_decay_ticks above and skips the early cosmetic phases before",
-            "it ever reaches ash either way - this setting only changes what happens once ash IS",
-            "reached, not that fast-forward."
+            "this setting's default (false). An empty corpse starts BUILD early after",
+            "empty_decay_ticks but keeps the complete visible decay sequence. This setting changes",
+            "only whether a marker remains once ASH finishes."
          }
       )
       .define("always_spawn_grave_marker", false);

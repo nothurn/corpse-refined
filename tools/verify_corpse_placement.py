@@ -3,6 +3,8 @@
 import math
 
 VERTICAL_OFFSETS = (0, 1, -1, 2, -2, 3, -3, 4, -4, *range(5, 17))
+SUPPORT_PROBE_DEPTH = 0.125
+VISIBLE_BODY_MARGIN = 0.125
 
 
 def cells(bounds):
@@ -21,11 +23,20 @@ def move(bounds, x, y, z):
 
 def safe(bounds, solid, fluid):
     occupied = set(cells(bounds))
-    return occupied.isdisjoint(solid) and occupied.isdisjoint(fluid)
+    min_x, min_y, min_z, max_x, max_y, max_z = bounds
+    fluid_probe = (
+        min_x - VISIBLE_BODY_MARGIN,
+        min_y - SUPPORT_PROBE_DEPTH,
+        min_z - VISIBLE_BODY_MARGIN,
+        max_x + VISIBLE_BODY_MARGIN,
+        max_y,
+        max_z + VISIBLE_BODY_MARGIN,
+    )
+    return occupied.isdisjoint(solid) and set(cells(fluid_probe)).isdisjoint(fluid)
 
 
 def supported(bounds, solid):
-    return not set(cells(move(bounds, 0, -0.125, 0))).isdisjoint(solid)
+    return not set(cells(move(bounds, 0, -SUPPORT_PROBE_DEPTH, 0))).isdisjoint(solid)
 
 
 def search(base_bounds, solid, fluid, max_radius, require_support):
@@ -46,16 +57,21 @@ def find(base_bounds, solid, fluid):
 
 
 def main():
-    # Lying corpse: the preferred 1.8-block body volume overlaps lava, while a dry bank exists nearby.
-    corpse = (-0.3, 0.0, -1.3, 0.3, 0.6, 0.5)
-    lava = {(x, 0, z) for x in range(-1, 2) for z in range(-2, 2)}
-    floor = {(x, -1, z) for x in range(-10, 11) for z in range(-10, 11)}
+    # Regression for the real screenshot: the hitbox itself is dry at y=1 and has partial
+    # support from the bank, but most of the rendered body hangs directly over lava at y=0.
+    # The support-layer fluid probe must reject it and move the complete visible footprint inland.
+    corpse = (-0.3, 1.0, -1.3, 0.3, 1.6, 0.5)
+    lava = {(x, 0, z) for x in range(-10, 11) for z in range(-10, 0)}
+    floor = {(x, 0, z) for x in range(-10, 11) for z in range(0, 11)}
+    assert supported(corpse, floor)
+    assert set(cells(corpse)).isdisjoint(lava)
+    assert not safe(corpse, floor, lava)
     bank_result = find(corpse, floor, lava)
     assert bank_result is not None and safe(bank_result[3], floor, lava)
     assert supported(bank_result[3], floor)
 
     # A collision in the far end of the lying body's bounds invalidates the whole placement.
-    wall = {(0, 0, -1)}
+    wall = {(0, 1, -1)}
     wall_result = find(corpse, floor, wall)
     assert wall_result is not None and wall_result[:3] != (0, 0, 0)
     assert safe(wall_result[3], floor, wall)
@@ -67,7 +83,7 @@ def main():
     assert safe(fallback_result[3], set(), pool)
 
     # A 0.75x1.3 grave marker gets the same dry, supported relocation behavior.
-    marker = (-0.375, 0.0, -0.375, 0.375, 1.3, 0.375)
+    marker = (-0.375, 1.0, -0.375, 0.375, 2.3, 0.375)
     marker_result = find(marker, floor, {(0, 0, 0), (0, 1, 0)})
     assert marker_result is not None and supported(marker_result[3], floor)
     assert safe(marker_result[3], floor, {(0, 0, 0), (0, 1, 0)})

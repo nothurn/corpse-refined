@@ -17,6 +17,7 @@ public final class CorpsePlacement {
    private static final int SUPPORTED_SEARCH_RADIUS = 8;
    private static final int FALLBACK_SEARCH_RADIUS = 2;
    private static final double SUPPORT_PROBE_DEPTH = 0.125;
+   private static final double VISIBLE_BODY_MARGIN = 0.125;
    private static final double BOUNDS_EPSILON = 1.0E-7;
    private static final int[] VERTICAL_OFFSETS = new int[]{
       0, 1, -1, 2, -2, 3, -3, 4, -4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
@@ -78,7 +79,18 @@ public final class CorpsePlacement {
          return false;
       }
 
-      AABB fluidCheckBounds = bounds.deflate(BOUNDS_EPSILON);
+      // The corpse model is slightly wider/longer than its interaction box, and a fluid
+      // directly below the box does not geometrically intersect it. Include both that visible
+      // overhang and the support layer so a corpse cannot be accepted with only its head on a
+      // dry bank while the rendered body lies across lava or water.
+      AABB fluidCheckBounds = new AABB(
+         bounds.minX - VISIBLE_BODY_MARGIN + BOUNDS_EPSILON,
+         bounds.minY - SUPPORT_PROBE_DEPTH + BOUNDS_EPSILON,
+         bounds.minZ - VISIBLE_BODY_MARGIN + BOUNDS_EPSILON,
+         bounds.maxX + VISIBLE_BODY_MARGIN - BOUNDS_EPSILON,
+         bounds.maxY - BOUNDS_EPSILON,
+         bounds.maxZ + VISIBLE_BODY_MARGIN - BOUNDS_EPSILON
+      );
       return BlockPos.betweenClosedStream(fluidCheckBounds)
          .allMatch(pos -> level.hasChunkAt(pos) && level.getFluidState(pos).isEmpty());
    }
